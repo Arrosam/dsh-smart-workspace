@@ -10,7 +10,7 @@
     <a href="https://github.com/PianoPrince/dsh-workspace-mover/actions/workflows/test.yml"><img alt="CI" src="https://github.com/PianoPrince/dsh-workspace-mover/actions/workflows/test.yml/badge.svg" style="height:20px; margin:0 2px;" /></a>
     <a href="https://www.npmjs.com/package/dsh-workspace-mover"><img alt="npm version" src="https://img.shields.io/npm/v/dsh-workspace-mover" style="height:20px; margin:0 2px;" /></a>
     <a href="https://www.npmjs.com/package/dsh-workspace-mover"><img alt="npm weekly downloads" src="https://img.shields.io/npm/dw/dsh-workspace-mover" style="height:20px; margin:0 2px;" /></a>
-    <img alt="plugin version" src="https://img.shields.io/badge/dsh--plugin-2.2.0-4d6bfe" style="height:20px; margin:0 2px;" />
+    <img alt="plugin version" src="https://img.shields.io/badge/dsh--plugin-2.3.0-4d6bfe" style="height:20px; margin:0 2px;" />
     <img alt="DSH tested 0.2.0-rc.2" src="https://img.shields.io/badge/DSH_tested-0.2.0--rc.2-4c8dff" style="height:20px; margin:0 2px;" />
     <img alt="Node" src="https://img.shields.io/badge/Node-%E2%89%A522-339933" style="height:20px; margin:0 2px;" />
   </p>
@@ -54,13 +54,15 @@ DeepSeek Harness 侧边栏可以拖拽排序**同一工作区**内的会话，�
 
 - **🖱️ 拖拽迁移**：把空闲会话行拖到目标工作区标题行，确认后完成移动
 - **📦 批量迁移 / 分组合并**：Ctrl/Shift 多选后整批拖移，或用组标题「⋯」菜单「整组迁移…」；源分组清空后可一键删除，两条命令完成合并（单批至多 50 个，失败互不牵连）
-- **🚚 真迁移 · 零 token**：会话 ID 与完整历史原样保留，不复制副本、不重新注入上下文
+- **🚚 真迁移 · 零 token**：会话 ID 与完整历史原样保留，不复制第二条会话、不重新注入上下文
 - **🏠 工作区搬家向导**：项目文件夹被移动/改名后，一键把失效分组原地重定向到新位置；id、标题、排序、归档位保持，名下会话连同旧路径散件一起迁移
 - **🛟 会话救援**（设置 → 会话救援）：一键找回「失联」「未记账」「挂错分组」的会话；已归档会话可恢复；支持一键修复与筛选
-- **🗑️ 回收站与备份**：删除先进回收站，可还原到原位置或任意分组；迁移自动生成备份，可按会话恢复或清理
-- **🛡️ 数据保护**：回收站与备份的份数/占用一屏可见；「清理 30 天前数据」先预览释放量，确认后执行
+- **🗑️ 回收站与备份**：删除先进回收站，可还原到原位置或任意分组；迁移自动生成恢复快照，可按会话恢复或清理
+- **🛡️ 数据保护**：相同会话内容只保留一份物理快照，往返迁移不会无限增长；每次迁移仍写入历史，备份列表显示快照份数与占用
 - **⏪ 移动历史与撤回**：记录最近 100 次跨工作区移动，批量聚合为一条，整批可一键撤回
 - **🧾 迁移任务中心**：批量迁移逐项持久化记录（完成/失败、最后错误与尝试时间），失败项一键重试——按会话当前位置重新迁移，不用陈旧路径
+- **⏳ 忙碌会话自动排队**：运行中的会话不会触碰文件，空闲后自动重试；队列持久化，支持单项取消、单项重试和批量重试失败项
+- **🔎 迁移预览**：确认前展示来源、目标路径、冲突、运行状态、适配器和本次预计新增备份大小；已有内容快照会明确显示复用
 - **📂 空分组清理 / 打开文件夹**：只列出真正零成员的工作区；组菜单可直达系统文件管理器
 - **🤖 Agent 工具**：`mover_list_sessions` / `mover_move_session` / `mover_repair_sessions` / `mover_doctor` 四个模型可调用工具——在对话里说「把这个会话挪到某组」即可触发与面板完全相同的备份回滚管线；迁移与修复执行前经宿主审批弹窗确认，未装 dsh-tools 的宿主自动停用
 
@@ -216,13 +218,31 @@ dsh plugin --profile web add "link:C:/path/to/dsh-workspace-mover"
 
 ## 🧩 兼容性与卸载
 
+### 为什么自检显示“存储适配器”警告？
+
+当前 DSH 未公开原始档案路径或原始字节迁移接口，插件使用宿主存储根目录和经过检查的 JSONL 文件布局进行迁移，因此显示 `filesystem-fallback` 警告。它表示兼容性降级，不代表迁移失败；请同时查看“存储布局”检查结果。宿主升级后应重新自检，布局未知或损坏时不要继续迁移。仅提供官方会话 handle、没有物理路径的宿主不支持物理迁移。
+
+恢复快照独立于主会话档案；复用的快照保留首次保存时的路径，默认恢复到该路径，也可明确选择其他工作区。历史记录不意味着对应快照会永久保留，超出保留上限或手动清理后，该快照可能不存在。
+
 ### 版本兼容矩阵
 
 | 插件版本 | 已验证 DeepSeek Harness | Node | 备注 |
 |----------|-------------------------|------|------|
-| 2.1.0 | `0.1.5-rc.1`、`0.1.5-rc.2`、**`0.2.0 桌面版`**（0.2.0-rc.2 内核） | `≥22` | Agent 工具 + 桌面版实测（拖拽迁移、确认框、热重载修复）；宿主缺 `dsh-tools` 时工具自动停用 |
+| 2.3.0 | `0.2.0-rc.2` Desktop（用户验证部分场景） | `≥22` | 空闲会话迁移与快照复用已反馈通过；Web、队列进程重启和完整 runtime smoke 待验证 |
+| 2.2.0 | `0.1.5-rc.1`、`0.1.5-rc.2`、**`0.2.0 桌面版`**（0.2.0-rc.2 内核） | `≥22` | 存储布局自检、Agent 工具与桌面版实测；宿主缺 `dsh-tools` 时工具自动停用 |
 | 2.0.3 | `0.1.5-rc.1`、`0.1.5-rc.2` | `≥22` | 真迁移 / 批量 / 救援 / 回收站 / 备份；首次发布 npm |
 | — | `0.2.0 web`（0.2.0-rc.2） | `≥22` | 与桌面版同内核，已按同一代码路径适配；web 启动场景待回归 |
+
+### 会话档案格式验证
+
+以下“本地通过”指仓库沙盒 fixture，不代表官方 DSH runtime 实测。Desktop 空闲迁移与快照复用已获用户反馈通过；其余真实 runtime 场景仍待验证，详见[兼容报告](docs/compatibility/dsh-0.2.0-rc.2-2026-10-13.md)。
+
+| 档案布局 | 本地沙盒 | 官方 DSH runtime |
+| --- | --- | --- |
+| v3 / v4 Zstd | 迁移与撤回通过；同目录选择最高代际并保留旧文件 | 待验收 |
+| legacy / v3 plain JSONL | 迁移与撤回通过，不升级代际 | 待验收 |
+| 混合压缩编码 | 明确拒绝 | 待验收 |
+| 文件名与 header 代际不符 | header 声明代际时，迁移前拒绝且字节不变 | 待验收 |
 
 - **engines 声明**：`package.json` → `engines.dsh` ≥ `0.1.5-rc.1`，`engines.node` ≥ `22`（与 CI 矩阵 Node 22/24 一致）。
 - **其他已知组合**：dsh-market `1.45.1`。不修改 DSH 源码，仅通过官方扩展点接入。
@@ -248,7 +268,8 @@ dsh plugin --profile web add "link:C:/path/to/dsh-workspace-mover"
 
 **具体承诺：**
 
-- **移动前自动备份**；搬运落地后再核对会话身份与路径，不符则整体回退；
+- **移动前自动生成恢复快照**；相同内容（忽略迁移产生的 `cwd` 变化）复用既有快照，搬运落地后再核对会话身份与路径，不符则整体回退；
+- **每次移动都记入历史**；历史记录保存来源、目标和所使用的快照，因此快照去重不会隐藏操作轨迹；
 - **失败时恢复到移动前状态**（文件与记账一并恢复）；
 - **删除先进回收站**，可还原到原位置或任意分组；彻底删除需二次确认；
 - **无法自动恢复时**，会在救援面板明确标出，需要人工确认；会话文件与备份始终保留；
@@ -266,12 +287,13 @@ dsh plugin --profile web add "link:C:/path/to/dsh-workspace-mover"
 - 宿主大版本升级若改变内部结构，相关能力可能降级或需重启后生效；搬家向导在无法安全写入时会在改动任何文件之前中止并提示；
 - **没有图形化设置页**：官方设置页需要宿主提供 `schemastery`（插件目录下不可解析，静态引入会打断启动）。策略改用环境变量配置，见下表；`mover_doctor` 会报告宿主服务与存储布局的降级情况；
 - **降级是可观测的**：插件优先使用官方接口（取消归档 `registry.unarchiveSession`、改名 `entity.setTitle`），宿主没有时自动回退到等价实现。回退是静默的（功能不变），所以 `mover.status.capabilities` 会同时给出 `unarchiveApi` / `setTitleApi` 能力位，`degradedFeatures` 里也会列出 `unarchive-official-api` / `set-title-official-api`——真机上一眼能看出走的是哪条路。
+- **存储适配器也会明确报告降级**：公开 persistence 句柄可用但没有物理路径时，`storageAdapter` 为 `official-handle`，诊断与预览仍可用，物理移动会明确提示不支持；有物理根目录时标记为 `filesystem-fallback`，并由 `mover_doctor` 解释原因。
 
 ### 🔧 可调策略（环境变量）
 
 | 策略 | 默认 | 环境变量 |
 |------|------|----------|
-| 每个会话保留的备份份数 | 20 | `DSH_WORKSPACE_MOVER_BACKUP_KEEP` |
+| 每个会话保留的物理快照数 | 20 | `DSH_WORKSPACE_MOVER_BACKUP_KEEP` |
 | 移动历史保留条数 | 100 | `DSH_WORKSPACE_MOVER_HISTORY_LIMIT` |
 | 单批移动 / 修复上限 | 50 | `DSH_WORKSPACE_MOVER_BATCH_LIMIT` |
 | 单个工作区搬家上限 | 200 | `DSH_WORKSPACE_MOVER_REPOINT_LIMIT` |
@@ -282,6 +304,15 @@ dsh plugin --profile web add "link:C:/path/to/dsh-workspace-mover"
 
 ## 🆕 最近版本
 
+### v2.3.0 · 2026-10-13
+
+- **恢复快照复用**：会话内容相同时复用已有快照，忽略迁移产生的 `cwd` 变化；内容发生变化才新增备份。每次迁移仍记录来源、目标及快照引用，默认保留最多 20 个物理快照，兼容旧备份。
+- **预览更清晰**：确认前显示实际来源、目标路径、冲突、运行状态及本次新增备份大小；复用时明确显示“复用已有快照”。单会话确认框支持显式选择目标工作区，修复往返迁移时目标识别错误。
+- **忙碌会话队列**：运行中的会话不触碰文件，进入持久化队列，空闲后自动尝试；支持取消、单项及批量重试。真实 DSH 进程重启恢复仍待实测。
+- **存储适配器与格式诊断**：显示当前适配模式及降级原因；支持 v3/v4 和 plain/Zstd 的沙盒验证，区分不支持的格式、未知布局和损坏数据，不强制升级旧格式。
+- **分支与便携包接口**：可明确选择包含后代分支；Portable Bundle 提供导出、校验和及默认 dry-run 导入接口，冲突与已知空间不足会阻断。当前只有沙盒验证，尚未完成真实 runtime 验收。
+- **恢复修正**：未指定文件时选择最新备份；导入空间估算包含附件。新增 npm 周下载量徽章。
+
 ### v2.2.0 · 2026-10-09
 
 - **批量移动不再"猜"会话身份**：权威 id 通道不可用时，旧兜底会按顺序顶替一个 id；现在无法确认的行一律跳过并在确认框里如实说明（全部无法识别则整体中止，不动任何文件）
@@ -290,7 +321,7 @@ dsh plugin --profile web add "link:C:/path/to/dsh-workspace-mover"
 - **存储布局自检**：反推一个真实会话的目录并验证，结果进入 `mover.status` 与自检面板（`data-layout`），把"某天突然全都找不到"提前变成可见的降级提示
 - **孤儿备份可见可清**：会话彻底删除后其迁移备份会永久残留；现在会标记孤儿组并支持一键清理，「彻底删除」时也可顺带勾选清理
 - **归档列表说明截断**：扫描只解析最新 400 条，较旧的归档会话可能不在列表中——UI 现在会说明
-- **策略可调**：备份份数 / 历史条数 / 单批上限 / 搬家上限 / 扫描上限 / 清理天数支持环境变量覆盖（`DSH_WORKSPACE_MOVER_*`）
+- **策略可调**：物理快照数 / 历史条数 / 单批上限 / 搬家上限 / 扫描上限 / 清理天数支持环境变量覆盖（`DSH_WORKSPACE_MOVER_*`）
 - **官方接口替代私有耦合**：取消归档改走官方 `registry.unarchiveSession`（保留回退通道）；标题同步改用官方 `entity.setTitle` 并与路径重定向解耦；`record.sessionIds` 的读取收敛为单一访问器
 - **可达性与文案**：弹窗补 `aria-labelledby`、打开即聚焦、Tab 循环；Esc 尊重"输入框聚焦时不清空"；清理死文案与两处漏出的英文硬编码，新增中英词条对账告警
 - **生态元数据**：新增 `screenshots.json`（自主控制市场卡片截图）；声明宿主包 `peerDependencies`（全部 `*` 且标 optional——它们只是元数据，真正的版本下限是 `engines.dsh`，运行时不匹配由能力位如实上报）；修正 README/ARCHITECTURE 中长期存在的工具数量与兼容性描述漂移

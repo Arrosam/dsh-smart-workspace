@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.3.0] - 2026-10-13
+
+### Added
+
+- Persistent busy-session migration queue with idle retries, cancellation, and individual/batch retry.
+- Migration preview and explicit target-workspace selection, adapter diagnostics, and v3/v4/plain/Zstd format checks.
+- Optional descendant migration and Portable Bundle export/inspection/dry-run import APIs (sandbox verified; real-runtime validation remains pending).
+- npm weekly downloads badge and documentation of the expected filesystem adapter warning.
+
+### Changed
+
+- Identical content reuses a recovery snapshot, ignoring migration-only cwd changes. Changed content creates a new snapshot; every move remains in history. Legacy backup filenames remain supported.
+- Preview displays newly required backup bytes and snapshot reuse. Retention limits count physical snapshots.
+
+### Fixed
+
+- Return-move workspace resolution and stale hover targets; failed or stale previews cannot execute against an earlier target.
+- Default backup restoration chooses the newest saved snapshot.
+- Portable Bundle space estimates include attachments and known insufficient space blocks execution.
+
+### Validation
+
+- User confirmed Desktop idle-session migration and snapshot reuse. Web, full runtime rollback smoke, and DSH process-restart queue recovery remain unverified; see the dated compatibility report.
+
+
 ## [2.2.0] - 2026-10-09
 
 ### Changed (behavior)

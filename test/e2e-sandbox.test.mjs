@@ -3,19 +3,21 @@
 // 备份目录通过 DSH_HOME 重定向到临时区，不污染真实环境。
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, renameSync, realpathSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { zstdCompressSync, constants } from 'node:zlib';
 
-import { apply, scanFrames, readHeader, artifactPath, openInFileManager, moveDir, stashBackup, verifyRelocatedArtifact, deleteSessionToTrash, moveSession, SCAN_MAX_ITEMS } from '../lib/index.js';
+import { apply, scanFrames, readHeader, artifactPath, sessionDir, createPersistenceAdapter, openInFileManager, moveDir, stashBackup, verifyRelocatedArtifact, deleteSessionToTrash, moveSession, SCAN_MAX_ITEMS } from '../lib/index.js';
 
 const OPTS = { params: { [constants.ZSTD_c_checksumFlag]: 1 } };
 const DEAD = 'E:\\wsm-dead-path'; // 刻意不存在的路径（孤儿分类用）
 let A; // 每次用例指向真实临时目录（健康会话要求 cwd 在磁盘上存在）
 let B;
 let root;
-let ctx, entityA, entityB, sharedIndex, workspaceEvents;
+let ctx, entityA, entityB, sharedIndex, workspaceEvents, cleanups;
 
 /** 测试根目录：优先 WSM_TEST_ROOT（受限环境下 Temp 可能禁止目录重命名），否则退回系统 Temp。 */
 function makeRoot() {
@@ -75,7 +77,8 @@ function makeEntity(id, path, hostRef) {
       if (record.sessionIds.includes(sid)) return;
       // 官方语义：未记账 id 需通过「头部 cwd 规范化后 === path」校验，
       // 并经 rememberSessionPath 回填三张索引后才挂账
-      const header = readHeader(readFileSync(findArtifact(sid)));
+      const artifact = findArtifact(sid);
+      const header = readHeader(readFileSync(artifact), artifact.endsWith('.zstd') ? 'zstd' : 'none');
       let canonical;
       try { canonical = realpathSync(header.cwd); } catch {
         throw new Error(`cwd does not resolve: '${header.cwd}'`);
@@ -104,10 +107,10 @@ function findArtifact(sessionId) {
     const dir = join(root, proj, sessionId);
     if (!existsSync(dir)) continue;
     const names = readdirSync(dir)
-      .filter((name) => name === 'session.jsonl.zstd' || /^session\.v[1-9][0-9]*\.jsonl\.zstd$/.test(name))
+      .filter((name) => /^session(?:\.v[1-9][0-9]*)?\.jsonl(?:\.zstd)?$/.test(name))
       .sort((a, b) => {
-        const va = a === 'session.jsonl.zstd' ? 0 : Number(/^session\.v([0-9]+)/.exec(a)[1]);
-        const vb = b === 'session.jsonl.zstd' ? 0 : Number(/^session\.v([0-9]+)/.exec(b)[1]);
+        const va = Number(/^session\.v([1-9][0-9]*)\.jsonl/.exec(a)?.[1] ?? 0);
+        const vb = Number(/^session\.v([1-9][0-9]*)\.jsonl/.exec(b)?.[1] ?? 0);
         return vb - va;
       });
     if (names.length) return join(dir, names[0]);
@@ -120,6 +123,7 @@ beforeEach(() => {
   // 的唯一性约定）；macOS 的 Temp 位于 /var → /private/var 符号链接下，
   // 夹具若用未规范化路径会与 canonical 比对失配，因此创建后立即归一。
   root = realpathSync(makeRoot());
+  cleanups = [];
   A = join(root, 'proj-alpha');
   B = join(root, 'proj-beta');
   mkdirSync(A, { recursive: true });
@@ -155,6 +159,7 @@ beforeEach(() => {
   };
   const persistence = {
     root,
+    compression: 'zstd',
     async list() {
       // 动态扫描 root（与真实后端一致）：遍历 projectKey 目录读头部
       const out = [];
@@ -164,15 +169,15 @@ beforeEach(() => {
         const projPath = join(root, proj);
         for (const idDir of readdirSync(projPath)) {
           const dir = join(projPath, idDir);
-          const names = existsSync(dir) ? readdirSync(dir).filter((name) => name === 'session.jsonl.zstd' || /^session\.v[1-9][0-9]*\.jsonl\.zstd$/.test(name)) : [];
+          const names = existsSync(dir) ? readdirSync(dir).filter((name) => /^session(?:\.v[1-9][0-9]*)?\.jsonl(?:\.zstd)?$/.test(name)) : [];
           if (!names.length) continue;
           names.sort((a, b) => {
-            const va = a === 'session.jsonl.zstd' ? 0 : Number(/^session\.v([0-9]+)/.exec(a)[1]);
-            const vb = b === 'session.jsonl.zstd' ? 0 : Number(/^session\.v([0-9]+)/.exec(b)[1]);
+            const va = Number(/^session\.v([1-9][0-9]*)\.jsonl/.exec(a)?.[1] ?? 0);
+            const vb = Number(/^session\.v([1-9][0-9]*)\.jsonl/.exec(b)?.[1] ?? 0);
             return vb - va;
           });
           const f = join(dir, names[0]);
-          try { out.push(readHeader(readFileSync(f))); } catch { /* skip */ }
+          try { out.push(readHeader(readFileSync(f), f.endsWith('.zstd') ? 'zstd' : 'none')); } catch { /* skip */ }
         }
       }
       return out;
@@ -184,12 +189,17 @@ beforeEach(() => {
     sessionPersistence: persistence,
     logger: { info() {}, warn() {} },
     get: () => undefined,
+    effect(register) {
+      const cleanup = register();
+      if (typeof cleanup === 'function') cleanups.push(cleanup);
+    },
     connection: { rpc: { handle(_ch, h) { rpcHandler = h; return () => {}; } } }
   };
   ctx.__rpc = () => rpcHandler;
 });
 
 afterEach(() => {
+  for (const cleanup of cleanups) cleanup();
   delete process.env.DSH_HOME;
   rmSync(root, { recursive: true, force: true });
 });
@@ -203,6 +213,321 @@ test('mover.status 就绪', async () => {
   const res = await call('mover.status');
   assert.equal(res.ok, true);
   assert.equal(res.value.ready, true);
+  assert.equal(res.value.capabilities.backupSnapshots, true);
+});
+
+test('mover.preview：安全项报告目标与备份大小，目标冲突明确阻断', async () => {
+  apply(ctx);
+  const safe = await call('mover.preview', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(safe.ok, true, JSON.stringify(safe));
+  assert.equal(safe.value.status, 'safe');
+  assert.equal(safe.value.target.path, B);
+  assert.ok(safe.value.estimatedBackupBytes > 0);
+  assert.equal(safe.value.adapter.mode, 'filesystem-fallback');
+
+  const collision = artifactPath(root, B, 'session-aaa');
+  mkdirSync(dirname(collision), { recursive: true });
+  writeFileSync(collision, makeArtifact({ type: 'session', id: 'session-aaa', cwd: B, title: 'Alpha discussion' }));
+  const blocked = await call('mover.preview', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(blocked.ok, true, JSON.stringify(blocked));
+  assert.equal(blocked.value.status, 'blocked');
+  assert.match(blocked.value.warnings.join(' '), /already contains/);
+});
+
+test('往返迁移预览从实际位置读取，只有当前工作区被标为无需移动', async () => {
+  apply(ctx);
+  entityA.record.sessionIds.push('session-aaa');
+  const moved = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(moved.ok, true, JSON.stringify(moved));
+  const same = await call('mover.preview', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(same.value.status, 'blocked');
+  assert.equal(same.value.target.collision, false);
+  assert.equal(same.value.estimatedBackupBytes, 0);
+  assert.ok(same.value.warnings.includes('session already belongs to the target workspace'));
+  const back = await call('mover.preview', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-a' });
+  assert.equal(back.value.source.cwd, B);
+  assert.equal(back.value.target.path, A);
+  assert.equal(back.value.status, 'safe');
+  const returned = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-a' });
+  assert.equal(returned.ok, true, JSON.stringify(returned));
+  assert.equal(readHeader(readFileSync(findArtifact('session-aaa'))).cwd, A);
+  assert.equal(existsSync(sessionDir(root, B, 'session-aaa')), false);
+});
+
+test('预览允许修复同工作区未登记会话，且不报告副本冲突', async () => {
+  apply(ctx);
+  const plan = await call('mover.preview', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-a' });
+  assert.equal(plan.value.status, 'safe');
+  assert.equal(plan.value.target.collision, false);
+  assert.equal(plan.value.estimatedBackupBytes, 0);
+  const repaired = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-a' });
+  assert.equal(repaired.ok, true, JSON.stringify(repaired));
+  assert.equal(repaired.value.attached, true);
+});
+
+test('救援扫描将混合压缩编码标为 unsupported，继续返回其余诊断', async () => {
+  apply(ctx);
+  const plain = join(sessionDir(root, A, 'session-aaa'), 'session.v3.jsonl');
+  writeFileSync(plain, Buffer.from([
+    JSON.stringify({ type: 'session', id: 'session-aaa', cwd: A }),
+    JSON.stringify({ type: 'message', id: 'event-mixed' })
+  ].join('\n') + '\n', 'utf8'));
+
+  const scan = await call('mover.scan');
+  assert.equal(scan.ok, true, JSON.stringify(scan));
+  const item = scan.value.items.find((entry) => entry.sessionId === 'session-aaa');
+  assert.equal(item.status, 'unreadable');
+  assert.equal(item.diagnostic, 'unsupported');
+  assert.match(item.diagnosticDetail, /mixed session compression encodings/);
+  const status = await call('mover.status');
+  assert.equal(status.value.storageLayout.diagnostic, 'unsupported');
+  const doctor = await call('mover.doctor');
+  assert.match(doctor.value.checks.find((entry) => entry.id === 'data-layout').detail, /unsupported/);
+});
+
+test('救援扫描明确区分损坏档案', async () => {
+  apply(ctx);
+  writeFileSync(artifactPath(root, A, 'session-aaa'), Buffer.from('damaged archive'));
+
+  const scan = await call('mover.scan');
+  assert.equal(scan.ok, true, JSON.stringify(scan));
+  const item = scan.value.items.find((entry) => entry.sessionId === 'session-aaa');
+  assert.equal(item.status, 'unreadable');
+  assert.equal(item.diagnostic, 'corrupt-data');
+  assert.ok(item.diagnosticDetail);
+  const status = await call('mover.status');
+  assert.equal(status.value.storageLayout.diagnostic, 'corrupt-data');
+});
+
+test('v4 Zstd 档案迁移与撤回时保留代际和事件字节', async () => {
+  apply(ctx);
+  entityA.record.sessionIds.push('session-aaa');
+  const sourceV3 = artifactPath(root, A, 'session-aaa');
+  const sourceV4 = join(dirname(sourceV3), 'session.v4.jsonl.zstd');
+  renameSync(sourceV3, sourceV4);
+
+  const moved = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(moved.ok, true, JSON.stringify(moved));
+  const targetV4 = join(sessionDir(root, B, 'session-aaa'), 'session.v4.jsonl.zstd');
+  assert.ok(existsSync(targetV4));
+  assert.equal(readHeader(readFileSync(targetV4)).cwd, B);
+
+  const undone = await call('mover.undo', { historyId: moved.value.historyId });
+  assert.equal(undone.ok, true, JSON.stringify(undone));
+  assert.ok(existsSync(sourceV4));
+  assert.equal(readHeader(readFileSync(sourceV4)).cwd, A);
+});
+
+test('v3/v4 同目录明确诊断最高代际，并保留旧代际文件', async () => {
+  apply(ctx);
+  entityA.record.sessionIds.push('session-aaa');
+  const sourceV3 = artifactPath(root, A, 'session-aaa');
+  const sourceV4 = join(dirname(sourceV3), 'session.v4.jsonl.zstd');
+  writeFileSync(sourceV4, readFileSync(sourceV3));
+
+  const status = await call('mover.status');
+  assert.match(status.value.storageLayout.generationWarning, /v4 is selected/);
+  const doctor = await call('mover.doctor');
+  assert.equal(doctor.value.checks.find((item) => item.id === 'data-layout')?.state, 'warn');
+
+  const preview = await call('mover.preview', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.deepEqual(preview.value.source.generations.map((item) => item.version), [4, 3]);
+  assert.match(preview.value.warnings.join(' '), /v4 is selected and older files are preserved/);
+  const moved = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(moved.ok, true, JSON.stringify(moved));
+  assert.ok(existsSync(join(sessionDir(root, B, 'session-aaa'), 'session.v3.jsonl.zstd')));
+  assert.equal(readHeader(readFileSync(join(sessionDir(root, B, 'session-aaa'), 'session.v4.jsonl.zstd'))).cwd, B);
+});
+
+test('legacy v0 与当前 v3 plain JSONL 均可迁移并撤回，不强制升级代际', async () => {
+  apply(ctx);
+  ctx.sessionPersistence.compression = 'none';
+  const cases = [
+    { sessionId: 'session-aaa', filename: 'session.jsonl' },
+    { sessionId: 'session-plain-v3', filename: 'session.v3.jsonl' }
+  ];
+  for (const item of cases) {
+    entityA.record.sessionIds.push(item.sessionId);
+    const sourceDir = sessionDir(root, A, item.sessionId);
+    mkdirSync(sourceDir, { recursive: true });
+    if (item.sessionId === 'session-aaa') rmSync(artifactPath(root, A, item.sessionId), { force: true });
+    const source = join(sourceDir, item.filename);
+    writeFileSync(source, Buffer.from([
+      JSON.stringify({ type: 'session', id: item.sessionId, cwd: A }),
+      JSON.stringify({ type: 'message', id: `event-${item.sessionId}` })
+    ].join('\n') + '\n', 'utf8'));
+
+    const moved = await call('mover.move', { sessionId: item.sessionId, targetWorkspaceId: 'wid-b' });
+    assert.equal(moved.ok, true, JSON.stringify(moved));
+    const target = join(sessionDir(root, B, item.sessionId), item.filename);
+    assert.ok(existsSync(target));
+    assert.equal(readHeader(readFileSync(target), 'none').cwd, B);
+    assert.equal(readFileSync(target, 'utf8').split('\n')[1], JSON.stringify({ type: 'message', id: `event-${item.sessionId}` }));
+
+    const undone = await call('mover.undo', { historyId: moved.value.historyId });
+    assert.equal(undone.ok, true, JSON.stringify(undone));
+    assert.equal(readHeader(readFileSync(source), 'none').cwd, A);
+  }
+});
+
+test('文件名代际与显式 header 代际不符时，在迁移前拒绝且字节不变', async () => {
+  apply(ctx);
+  entityA.record.sessionIds.push('session-aaa');
+  const source = artifactPath(root, A, 'session-aaa');
+  const bytes = makeArtifact({ type: 'session', id: 'session-aaa', cwd: A, formatVersion: 4 });
+  writeFileSync(source, bytes);
+
+  const moved = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(moved.ok, false);
+  assert.equal(moved.error.code, 'unsupported');
+  assert.deepEqual(readFileSync(source), bytes);
+  assert.ok(!existsSync(artifactPath(root, B, 'session-aaa')));
+});
+
+test('busy 迁移进入持久化队列，空闲后可重试完成', async () => {
+  apply(ctx);
+  entityA.record.sessionIds.push('session-aaa');
+  ctx.get = (key) => (key === 'agents' ? { get: () => ({ status: 'running' }) } : undefined);
+  const queued = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(queued.ok, false);
+  assert.equal(queued.error.code, 'busy');
+  assert.ok(queued.error.details.queueTaskId);
+
+  const waiting = await call('mover.migrations.list');
+  const waitingItem = waiting.value.items.find((item) => item.id === queued.error.details.queueTaskId);
+  assert.equal(waitingItem.state, 'waiting-for-idle');
+
+  ctx.get = () => undefined;
+  const retried = await call('mover.migrations.retry', { taskId: waitingItem.id });
+  assert.equal(retried.ok, true, JSON.stringify(retried));
+  assert.equal(retried.value.item.state, 'done');
+  assert.ok(existsSync(artifactPath(root, B, 'session-aaa')));
+  const repeated = await call('mover.migrations.retry', { taskId: waitingItem.id });
+  assert.equal(repeated.value.item.state, 'done');
+  assert.equal(repeated.value.item.attempts, retried.value.item.attempts, 'completed retries are idempotent');
+});
+
+test('busy 队列在插件重新挂载后从持久化记录继续执行', async () => {
+  apply(ctx);
+  entityA.record.sessionIds.push('session-aaa');
+  ctx.get = (key) => (key === 'agents' ? { get: () => ({ status: 'running' }) } : undefined);
+  const queued = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  const queueFile = join(root, 'workspace-mover', 'migrations.json');
+  assert.ok(existsSync(queueFile));
+
+  for (const cleanup of cleanups) cleanup();
+  cleanups = [];
+  ctx.get = () => undefined;
+  let restartedRpc;
+  const restartedCtx = {
+    ...ctx,
+    effect(register) {
+      const cleanup = register();
+      if (typeof cleanup === 'function') cleanups.push(cleanup);
+    },
+    connection: { rpc: { handle(_ch, handler) { restartedRpc = handler; return () => {}; } } }
+  };
+  apply(restartedCtx);
+  const recovered = await restartedRpc('mover.migrations.list', {});
+  assert.equal(recovered.ok, true, JSON.stringify(recovered));
+  const item = recovered.value.items.find((entry) => entry.id === queued.error.details.queueTaskId);
+  assert.equal(item.state, 'done');
+  assert.ok(existsSync(artifactPath(root, B, 'session-aaa')));
+});
+
+test('迁移队列支持批量重试并逐项隔离失败', async () => {
+  apply(ctx);
+  const queued = await call('mover.migrations.enqueue', {
+    targetWorkspaceId: 'wid-b',
+    sessions: [{ sessionId: 'session-missing-a' }, { sessionId: 'session-missing-b' }]
+  });
+  assert.equal(queued.ok, true, JSON.stringify(queued));
+  const taskIds = queued.value.queued.map((item) => item.id);
+  const retry = await call('mover.migrations.retry', { taskIds });
+  assert.equal(retry.ok, true, JSON.stringify(retry));
+  assert.equal(retry.value.retried, 2);
+  assert.deepEqual(retry.value.items.map((item) => item.state), ['failed', 'failed']);
+  assert.deepEqual(retry.value.items.map((item) => item.attempts), [2, 2]);
+});
+
+test('迁移队列执行中拒绝取消，损坏的队列数据由 status 和 doctor 显示', async () => {
+  apply(ctx);
+  entityA.record.sessionIds.push('session-aaa');
+  ctx.get = (key) => (key === 'agents' ? { get: () => ({ status: 'running' }) } : undefined);
+  const queued = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  ctx.get = () => undefined;
+
+  const originalList = ctx.sessionPersistence.list.bind(ctx.sessionPersistence);
+  let entered;
+  const inMove = new Promise((resolve) => { entered = resolve; });
+  let release;
+  const hold = new Promise((resolve) => { release = resolve; });
+  ctx.sessionPersistence.list = async (...args) => {
+    entered();
+    await hold;
+    return originalList(...args);
+  };
+  const retrying = call('mover.migrations.retry', { taskId: queued.error.details.queueTaskId });
+  await inMove;
+  const cancel = await call('mover.migrations.cancel', { taskId: queued.error.details.queueTaskId });
+  assert.equal(cancel.ok, false);
+  assert.equal(cancel.error.code, 'busy');
+  release();
+  const done = await retrying;
+  assert.equal(done.value.item.state, 'done');
+
+  writeFileSync(join(root, 'workspace-mover', 'migrations.json'), '{broken', 'utf8');
+  const status = await call('mover.status');
+  assert.equal(status.ok, true);
+  assert.match(status.value.capabilities.migrationQueueState.error, /corrupt/);
+  assert.ok(status.value.degradedFeatures.includes('migration-queue-data'));
+  const doctor = await call('mover.doctor');
+  assert.equal(doctor.ok, true);
+  assert.equal(doctor.value.checks.find((item) => item.id === 'data-migrations')?.state, 'fail');
+});
+
+test('official handle-only persistence 被明确标记为降级而不是猜物理路径', async () => {
+  const official = createPersistenceAdapter({ sessionPersistence: {
+    async list() { return []; },
+    async stat() { return { formatStatus: 'jsonl' }; },
+    async open() { return {}; }
+  } });
+  assert.equal(official.mode, 'official-handle');
+  assert.equal(official.capabilities.physicalPath, false);
+  await assert.rejects(() => official.read({ kind: 'handle', sessionId: 'x' }), /raw-byte physical path/);
+});
+
+test('fork-tree 预览会列出后代，Portable Bundle 导入先 dry-run 再执行', async () => {
+  apply(ctx);
+  entityA.record.sessionIds.push('session-aaa');
+  const child = artifactPath(root, A, 'session-child');
+  mkdirSync(dirname(child), { recursive: true });
+  writeFileSync(child, makeArtifact({ type: 'session', id: 'session-child', parentSessionId: 'session-aaa', cwd: A, title: 'Child branch' }));
+
+  const preview = await call('mover.preview', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b', mode: 'include-descendants' });
+  assert.equal(preview.ok, true, JSON.stringify(preview));
+  assert.equal(preview.value.branches.count, 1);
+  assert.deepEqual(preview.value.branches.sessionIds, ['session-aaa', 'session-child']);
+
+  const bundlePath = join(root, 'portable-bundle');
+  const exported = await call('mover.bundle.export', { sessionId: 'session-aaa', bundlePath, mode: 'include-descendants' });
+  assert.equal(exported.ok, true, JSON.stringify(exported));
+  assert.equal(exported.value.sessionCount, 2);
+  assert.ok(existsSync(join(bundlePath, 'manifest.json')));
+  assert.ok(existsSync(join(bundlePath, 'checksums.json')));
+
+  entityA.record.sessionIds = [];
+  rmSync(dirname(artifactPath(root, A, 'session-aaa')), { recursive: true, force: true });
+  rmSync(dirname(artifactPath(root, A, 'session-child')), { recursive: true, force: true });
+  const dryRun = await call('mover.bundle.import', { bundlePath, targetWorkspaceId: 'wid-b' });
+  assert.equal(dryRun.ok, true, JSON.stringify(dryRun));
+  assert.equal(dryRun.value.dryRun, true);
+  assert.equal(dryRun.value.status, 'safe');
+  const imported = await call('mover.bundle.import', { bundlePath, targetWorkspaceId: 'wid-b', dryRun: false });
+  assert.equal(imported.ok, true, JSON.stringify(imported));
+  assert.equal(imported.value.importedCount, 2);
+  assert.ok(existsSync(artifactPath(root, B, 'session-aaa')));
+  assert.ok(existsSync(artifactPath(root, B, 'session-child')));
 });
 
 test('v2.2 mover.status 能力位：官方接口缺失时如实标记为降级（可观测，不静默）', async () => {
@@ -1252,6 +1577,43 @@ test('stashBackup：相邻前缀 id 互不误删；同一毫秒的连续备份�
   assert.equal(readdirSync(dir).filter((f) => f.startsWith(`${b}.`)).length, 1, '相邻前缀 id 仍不受影响');
 });
 
+test('stashBackup：忽略迁移 cwd 后复用同一快照，内容变化才新增物理文件', () => {
+  const dir = join(root, 'workspace-mover', 'backups');
+  const firstBytes = makeArtifact({ type: 'session', id: 'session-dedupe', cwd: A, title: 'Stable content' });
+  const sameContentAtOtherWorkspace = makeArtifact({ type: 'session', id: 'session-dedupe', cwd: B, title: 'Stable content' });
+  const first = stashBackup('session-dedupe', firstBytes, { compression: 'zstd', ignoreCwd: true });
+  const reused = stashBackup('session-dedupe', sameContentAtOtherWorkspace, { compression: 'zstd', ignoreCwd: true });
+  assert.equal(first.created, true);
+  assert.equal(reused.reused, true);
+  assert.equal(reused.addedBytes, 0);
+  assert.equal(readdirSync(dir).filter((f) => f.startsWith('session-dedupe.')).length, 1);
+
+  const changed = makeArtifact({ type: 'session', id: 'session-dedupe', cwd: B, title: 'Changed content' });
+  const second = stashBackup('session-dedupe', changed, { compression: 'zstd', ignoreCwd: true });
+  assert.equal(second.created, true);
+  assert.equal(readdirSync(dir).filter((f) => f.startsWith('session-dedupe.')).length, 2);
+});
+
+test('往返迁移：备份物理文件只保留一份，但每次移动历史都记录复用状态', async () => {
+  apply(ctx);
+  entityA.record.sessionIds.push('session-aaa');
+  const first = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  const backPreview = await call('mover.preview', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-a' });
+  assert.equal(backPreview.ok, true, JSON.stringify(backPreview));
+  assert.equal(backPreview.value.backup.reused, true);
+  assert.equal(backPreview.value.estimatedBackupBytes, 0);
+  const back = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-a' });
+  assert.equal(back.ok, true, JSON.stringify(back));
+  const files = readdirSync(join(root, 'workspace-mover', 'backups')).filter((f) => f.startsWith('session-aaa.'));
+  assert.equal(files.length, 1, JSON.stringify(files));
+  const history = await call('mover.history');
+  assert.equal(history.ok, true);
+  assert.equal(history.value.items.length, 2);
+  assert.equal(history.value.items[0].backup.reused, true);
+  assert.equal(history.value.items[1].backup.created, true);
+});
+
 //#region v0.9：回收站 + 备份管理
 
 /** 投影缓存 mock：插件在服务缺省时降级为 no-op，需要验证标题行为时挂上。
@@ -2177,6 +2539,7 @@ test('宿主布局漂移时自证失败：storageLayout=degraded 且列为降级
   const status = await call('mover.status');
   assert.equal(status.ok, true, 'status 本身永远 ok');
   assert.equal(status.value.capabilities.storageLayout, 'degraded');
+  assert.equal(status.value.storageLayout.diagnostic, 'layout-unknown');
   assert.ok(status.value.degradedFeatures.includes('storage-layout'),
     `降级特性应包含 storage-layout: ${JSON.stringify(status.value.degradedFeatures)}`);
   assert.equal(typeof status.value.storageLayout.reason, 'string');
@@ -2198,3 +2561,47 @@ test('没有会话可校验时 storageLayout=empty（全新安装不误报降级
 });
 //#endregion
 
+
+test('默认恢复选择最新备份，显式指定时仍可恢复旧备份', async () => {
+  apply(ctx);
+  const dir = join(root, 'workspace-mover', 'backups');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'session-aaa.1000.zstd'), makeArtifact({ type: 'session', id: 'session-aaa', cwd: A, title: 'Old content' }));
+  writeFileSync(join(dir, 'session-aaa.2000.zstd'), makeArtifact({ type: 'session', id: 'session-aaa', cwd: A, title: 'Latest content' }));
+  rmSync(dirname(artifactPath(root, A, 'session-aaa')), { recursive: true, force: true });
+  const restored = await call('mover.backups.restore', { sessionId: 'session-aaa' });
+  assert.equal(restored.ok, true, JSON.stringify(restored));
+  assert.equal(readHeader(readFileSync(artifactPath(root, A, 'session-aaa'))).title, 'Latest content');
+  entityA.record.sessionIds = [];
+  sharedIndex.sessionPaths.delete('session-aaa');
+  rmSync(dirname(artifactPath(root, A, 'session-aaa')), { recursive: true, force: true });
+  const old = await call('mover.backups.restore', { sessionId: 'session-aaa', fileName: 'session-aaa.1000.zstd' });
+  assert.equal(old.ok, true, JSON.stringify(old));
+  assert.equal(readHeader(readFileSync(artifactPath(root, A, 'session-aaa'))).title, 'Old content');
+});
+
+test('Bundle 空间估算包含附件，空间不足时 dry-run 阻断且执行不写入', async () => {
+  apply(ctx);
+  const attachment = Buffer.alloc(4096, 7);
+  writeFileSync(join(dirname(artifactPath(root, A, 'session-aaa')), 'attachment.bin'), attachment);
+  const bundlePath = join(root, 'space-bundle');
+  const exported = await call('mover.bundle.export', { sessionId: 'session-aaa', bundlePath });
+  assert.equal(exported.ok, true, JSON.stringify(exported));
+  const archiveBytes = readFileSync(artifactPath(root, A, 'session-aaa')).length;
+  rmSync(dirname(artifactPath(root, A, 'session-aaa')), { recursive: true, force: true });
+  const original = fs.statfsSync;
+  fs.statfsSync = () => ({ bfree: 1, bsize: 1 });
+  syncBuiltinESMExports();
+  try {
+    const plan = await call('mover.bundle.inspect', { bundlePath, targetWorkspaceId: 'wid-b' });
+    assert.equal(plan.ok, true, JSON.stringify(plan));
+    assert.equal(plan.value.requiredBytes, archiveBytes + attachment.length);
+    assert.equal(plan.value.status, 'blocked');
+    const imported = await call('mover.bundle.import', { bundlePath, targetWorkspaceId: 'wid-b', dryRun: false });
+    assert.equal(imported.ok, false);
+    assert.ok(!existsSync(artifactPath(root, B, 'session-aaa')));
+  } finally {
+    fs.statfsSync = original;
+    syncBuiltinESMExports();
+  }
+});

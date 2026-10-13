@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({
 				confirmTitle: "跨工作区移动会话",
 				target: "目标工作区",
 				session: "会话",
-				hint: "将物理搬移原始会话档案并改写归属；历史记录原样保留，不产生副本。",
+				hint: "将物理搬移原始会话档案并改写归属，历史记录原样保留。",
 				move: "移动",
 				cancel: "取消",
 				moving: "正在移动…",
@@ -52,6 +52,9 @@ window.__ModuleLoader__.load({
 				stalePath: "路径失效",
 				ungroupedBadge: "未归组",
 				unreadable: "无法读取",
+				unsupportedFormat: "当前格式不受支持",
+				layoutUnknown: "存储布局未知",
+				corruptData: "档案数据损坏或无法解析",
 				ghostsTitle: "名单里有、但文件已不在的记录",
 				ghostsHelp: "侧边栏的分组名单里记着这些会话，但对应的记录文件已经不在磁盘上（通常是被手动删除的）。一般不影响使用；重启 Harness 后通常会自动清理。",
 				helpPath: "会话原来的文件夹被移动、改名或删除，所以侧边栏看不到它。选择一个分组，历史会原样迁移过去，会话 ID 保持不变。",
@@ -127,8 +130,8 @@ window.__ModuleLoader__.load({
 				purgeBackupsToo: "这个会话还有 {n} 份迁移备份。一并删除吗？\n\n（会话已不存在，这些备份不会再被用到；保留则可在备份列表里单独恢复或清理。）",
 				purgeBackupsDone: "（含 {n} 份备份）",
 				backupsCaption: "备份",
-				backupsHelp: "每次迁移前自动生成的字节级备份都在这里。可以把会话恢复回备份时的原位置（若那里没有同 id 会话），或恢复到任意其他分组。",
-				backupMeta: "{n} 份 · {size} · {range}",
+				backupsHelp: "这里列出迁移恢复快照。相同会话内容只保留一份物理快照，但每次迁移仍会记录历史；可恢复到原位置或任意其他分组。",
+				backupMeta: "{n} 个快照 · {size} · {range}",
 				backupDeleteBtn: "删除备份",
 				backupDeleteConfirm: "删除「{title}」的 {n} 份备份？删除后无法再从备份恢复。",
 				backupDeletedMsg: "✓ 已删除 {n} 份备份",
@@ -156,8 +159,13 @@ window.__ModuleLoader__.load({
 				doctorDataBackups: "备份目录",
 				doctorDataHistory: "移动历史",
 				doctorDataTasks: "任务记录",
+				doctorDataMigrations: "迁移队列",
 				doctorRecovery: "恢复记录",
 				doctorDataLayout: "存储布局",
+				doctorStorageAdapter: "存储适配器",
+				adapterFilesystemFallback: "当前 DSH 未提供原始档案路径接口，使用文件路径适配器；存储布局自检通过后可迁移。",
+				adapterOfficialHandle: "官方会话接口可用，但未提供原始档案路径，当前无法迁移档案目录。",
+				adapterUnavailable: "当前持久化服务缺少可用接口。",
 				doctorWorkspaces: "工作区路径",
 				repairAllBtn: "一键修复",
 				repairAllDone: "✓ 已修复 {n} · 跳过 {s} · 失败 {f}",
@@ -165,6 +173,39 @@ window.__ModuleLoader__.load({
 				filterPh: "筛选：标题 / 会话 ID / 路径…",
 				tasksCaption: "迁移任务",
 				tasksHelp: "批量迁移的持久化记录：完成 / 失败逐项可查。失败项可一键重试——按会话当前位置重新迁移，不会用记录里的旧路径；清除记录不影响已迁移的会话。",
+				queueCaption: "等待迁移",
+				queueHelp: "运行中的会话不会触碰文件；会话空闲后自动尝试，失败项可以重试或取消。",
+				queueRetryBtn: "重试",
+				queueRetryAllBtn: "重试全部失败项",
+				queueCancelBtn: "取消",
+				queueRetryDone: "✓ 已重新尝试迁移",
+				queueRetryAllDone: "✓ 已逐项重试 {n} 个失败任务",
+				queueCancelled: "✓ 已取消迁移任务",
+				queuedMove: "已排队：会话空闲后自动迁移",
+				batchQueuedTail: "；{n} 个会话已排队等待空闲",
+				previewStatus: "预览状态",
+				previewSource: "来源",
+				previewTarget: "目标路径",
+				previewBackup: "本次新增备份",
+				previewBackupReused: "复用已有快照，不新增磁盘占用",
+				previewBackupHelp: "迁移前保存恢复快照，用于失败回滚和备份恢复；相同会话内容会复用已有快照，主档案仍只移动一份。",
+				previewSameWorkspace: "会话已在目标工作区，无需移动。",
+				previewSelfHeal: "档案已在目标工作区，将补齐归属记录。",
+				previewRunning: "会话正在运行，将排队等待空闲。",
+				previewNoPhysicalPath: "当前 DSH 未提供原始档案路径，无法迁移档案目录。",
+				previewSourceMissing: "来源会话档案缺失或无法读取。",
+				previewCollision: "目标工作区已有同 ID 档案，已阻止覆盖。",
+				previewGenerations: "发现多个格式代际，选择 v{n} 并保留旧文件。",
+				previewDescendants: "已选择 {n} 个后代会话。",
+				forkMode: "分支范围",
+				forkCurrentOnly: "仅当前会话",
+				forkIncludeDescendants: "包含所有后代分支",
+				forkHint: "默认只迁移当前会话；选择后代分支会逐项迁移并独立记录结果。",
+				previewWarning: "提示",
+				previewSafe: "可安全移动",
+				previewQueued: "会进入空闲队列",
+				previewBlocked: "当前不可移动",
+				previewWarningState: "需要确认",
 				taskRetryBtn: "重试失败项",
 				taskRetryDone: "✓ 重试完成：成功 {n} · 失败 {f}",
 				taskForgetBtn: "清除记录",
@@ -179,7 +220,7 @@ window.__ModuleLoader__.load({
 				confirmTitle: "Move session across workspaces",
 				target: "Target workspace",
 				session: "Session",
-				hint: "Physically relocates the original session archive; history stays intact, no copy is made.",
+				hint: "Physically relocates the original session archive and updates its workspace; history stays intact.",
 				move: "Move",
 				cancel: "Cancel",
 				moving: "Moving…",
@@ -211,6 +252,9 @@ window.__ModuleLoader__.load({
 				stalePath: "Stale path",
 				ungroupedBadge: "Ungrouped",
 				unreadable: "Unreadable",
+				unsupportedFormat: "Unsupported format",
+				layoutUnknown: "Unknown storage layout",
+				corruptData: "Archive data is damaged or cannot be parsed",
 				ghostsTitle: "Listed in groups but missing on disk",
 				ghostsHelp: "These sessions are still recorded in group rosters, but their files are gone from disk (usually deleted by hand). Harmless in general; a harness restart normally cleans them up.",
 				helpPath: "The folder this session lived in was moved, renamed or deleted, so the sidebar cannot show it. Pick a group — history moves over as-is and the session ID stays the same.",
@@ -286,8 +330,8 @@ window.__ModuleLoader__.load({
 				purgeBackupsToo: "This session still has {n} migration backup copy(ies). Delete them too?\n\n(The session no longer exists, so those backups will not be used again; keeping them lets you restore or clean them separately from the backup list.)",
 				purgeBackupsDone: " (including {n} backup copy(ies))",
 				backupsCaption: "Backups",
-				backupsHelp: "Every move creates a byte-level backup first; they are all listed here. Restore a session back to where the backup was taken (if no session with the same id lives there), or into any other group.",
-				backupMeta: "{n} copies · {size} · {range}",
+				backupsHelp: "Migration recovery snapshots are listed here. Identical session content keeps one physical snapshot while every move remains in history; restore to the original location or any other group.",
+				backupMeta: "{n} snapshots · {size} · {range}",
 				backupDeleteBtn: "Delete backups",
 				backupDeleteConfirm: "Delete the {n} backup copies of \"{title}\"? They cannot be restored from afterwards.",
 				backupDeletedMsg: "✓ Deleted {n} backup copy(ies)",
@@ -315,8 +359,13 @@ window.__ModuleLoader__.load({
 				doctorDataBackups: "Backups",
 				doctorDataHistory: "Move history",
 				doctorDataTasks: "Task records",
+				doctorDataMigrations: "Migration queue",
 				doctorRecovery: "Recovery records",
 				doctorDataLayout: "Storage layout",
+				doctorStorageAdapter: "Storage adapter",
+				adapterFilesystemFallback: "This DSH build has no public raw archive path API. The filesystem adapter is active; migration is available when the storage layout check passes.",
+				adapterOfficialHandle: "Official session APIs are available without a raw archive path; archive directory migration is unavailable.",
+				adapterUnavailable: "The persistence provider does not expose enough usable APIs.",
 				doctorWorkspaces: "Workspace paths",
 				repairAllBtn: "Fix all",
 				repairAllDone: "✓ Fixed {n} · skipped {s} · failed {f}",
@@ -324,6 +373,39 @@ window.__ModuleLoader__.load({
 				filterPh: "Filter: title / session id / path…",
 				tasksCaption: "Move tasks",
 				tasksHelp: "Persistent records of bulk moves: every done / failed item is inspectable. Failed items can be retried in one click — retried from where each session currently lives, never from a stale recorded path; clearing a record never touches moved sessions.",
+				queueCaption: "Waiting migrations",
+				queueHelp: "Running sessions are never touched. The migration is retried automatically after the session becomes idle; failed items can be retried or cancelled.",
+				queueRetryBtn: "Retry",
+				queueRetryAllBtn: "Retry all failed",
+				queueCancelBtn: "Cancel",
+				queueRetryDone: "✓ Migration retried",
+				queueRetryAllDone: "✓ Retried {n} failed migration(s) independently",
+				queueCancelled: "✓ Migration cancelled",
+				queuedMove: "Queued: it will move automatically when the session is idle",
+				batchQueuedTail: "; {n} session(s) queued until idle",
+				previewStatus: "Preview status",
+				previewSource: "Source",
+				previewTarget: "Target path",
+				previewBackup: "New backup bytes",
+				previewBackupReused: "Reusing an existing snapshot; no new disk space",
+				previewBackupHelp: "A recovery snapshot is saved before migration for rollback and restoration. Identical session content reuses an existing snapshot while the primary archive still moves only once.",
+				previewSameWorkspace: "The session is already in the target workspace; no move is needed.",
+				previewSelfHeal: "The archive is already in the target workspace; its membership will be repaired.",
+				previewRunning: "The session is running and will wait until idle.",
+				previewNoPhysicalPath: "This DSH build exposes no raw archive path; archive directory migration is unavailable.",
+				previewSourceMissing: "The source session archive is missing or unreadable.",
+				previewCollision: "The target already contains an archive with this ID; overwriting is blocked.",
+				previewGenerations: "Multiple format generations found; v{n} is selected and older files are preserved.",
+				previewDescendants: "{n} descendant sessions selected.",
+				forkMode: "Fork scope",
+				forkCurrentOnly: "Current session only",
+				forkIncludeDescendants: "Include descendants",
+				forkHint: "Only the current session moves by default. Descendants are migrated independently and reported one by one.",
+				previewWarning: "Note",
+				previewSafe: "Safe to move",
+				previewQueued: "Will wait until idle",
+				previewBlocked: "Cannot move now",
+				previewWarningState: "Review before moving",
 				taskRetryBtn: "Retry failed",
 				taskRetryDone: "✓ Retry finished: {n} succeeded · {f} failed",
 				taskForgetBtn: "Clear record",
@@ -359,6 +441,28 @@ window.__ModuleLoader__.load({
 			const raw = String(err?.message ?? err);
 			return /inactive context/.test(raw) ? t("contextStale") : raw;
 		};
+		const diagnosticText = (raw) => {
+			const text = String(raw ?? "");
+			const keys = {
+				'official session handles are available only for metadata; physical JSONL path adapter is active': 'adapterFilesystemFallback',
+				'public raw-byte path API is unavailable; physical JSONL path adapter is active': 'adapterFilesystemFallback',
+				'provider exposes public list/stat/open APIs but no public raw-byte path; physical moves are unavailable': 'adapterOfficialHandle',
+				'provider does not expose enough public persistence APIs': 'adapterUnavailable',
+				'physical move uses the JSONL path fallback; official raw-byte path API is unavailable': 'adapterFilesystemFallback',
+				'session is currently running and will wait for idle': 'previewRunning',
+				'provider exposes public handles but no physical raw-byte path; this version cannot relocate the archive directory': 'previewNoPhysicalPath',
+				'source session archive is missing or unreadable': 'previewSourceMissing',
+				'target workspace already contains an archive with this session id': 'previewCollision',
+				'session already belongs to the target workspace': 'previewSameWorkspace',
+				'session archive is already at target; workspace membership will be repaired': 'previewSelfHeal'
+			};
+			if (keys[text]) return t(keys[text]);
+			const generations = /^multiple generations found; v(\d+) is selected and older files are preserved$/.exec(text);
+			if (generations) return t('previewGenerations', { n: generations[1] });
+			const descendants = /^(\d+) descendant session\(s\) selected$/.exec(text);
+			if (descendants) return t('previewDescendants', { n: descendants[1] });
+			return text;
+		};
 
 		function ensureStyle() {
 			if (document.getElementById(STYLE_ID)) return;
@@ -382,6 +486,7 @@ window.__ModuleLoader__.load({
 .wsm-row{font-size:13px;line-height:20px;margin:6px 0;word-break:break-all}
 .wsm-label{color:var(--dsw-alias-label-secondary,#777)}
 .wsm-hint{font-size:12px;color:var(--dsw-alias-label-tertiary,#999);margin-top:10px;line-height:17px}
+.wsm-preview{font-size:12px;line-height:18px;white-space:pre-wrap;word-break:break-word;margin-top:10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fafafa);color:var(--dsw-alias-label-secondary,#666)}
 .wsm-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
 .wsm-btn{appearance:none;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.15));background:transparent;color:var(--dsw-alias-label-primary,#111);
  border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer}
@@ -558,7 +663,9 @@ window.__ModuleLoader__.load({
   <div class="wsm-title" id="${uid}"></div>
   <div class="wsm-row"><span class="wsm-label"></span> <b class="wsm-session"></b></div>
   <div class="wsm-row"><span class="wsm-label"></span> <b class="wsm-target"></b></div>
+  <div class="wsm-row wsm-fork-row" hidden><span class="wsm-label"></span> <select class="wsm-select wsm-fork-mode"></select></div>
   <div class="wsm-hint"></div>
+  <div class="wsm-preview" hidden></div>
   <div class="wsm-actions">
     <button class="wsm-btn wsm-cancel"></button>
     <button class="wsm-btn primary wsm-ok"></button>
@@ -594,17 +701,96 @@ window.__ModuleLoader__.load({
 				});
 			}
 
-			function confirmMove({ sessionId, sessionTitle, workspace, batchCount, unresolvedCount }) {
+			function formatPreviewBytes(value) {
+				const n = Number(value);
+				if (!Number.isFinite(n) || n <= 0) return "0 B";
+				const units = ["B", "KB", "MB", "GB"];
+				const at = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+				return `${(n / (1024 ** at)).toFixed(at === 0 ? 0 : 1)} ${units[at]}`;
+			}
+
+			function confirmMove({ sessionId, sessionTitle, workspace, workspaces, loadPreview, batchCount, unresolvedCount, preview }) {
 				return new Promise((resolve) => {
 					const overlay = injectOverlay();
 					const okBtn = overlay.querySelector(".wsm-ok");
+					let selectedWorkspace = workspace;
+					let previewRequest = 0;
+					let closed = false;
 					overlay.querySelector(".wsm-title").textContent = batchCount ? t("batchConfirmTitle") : t("confirmTitle");
 					overlay.querySelector(".wsm-session").textContent = batchCount
 						? t("scannedN", { n: batchCount })
 						: (sessionTitle || t("unnamedSession"));
 					overlay.querySelector(".wsm-target").textContent = `${workspace.title}（${workspace.path}）`;
+					let targetSelect = null;
+					if (Array.isArray(workspaces) && typeof loadPreview === 'function') {
+						targetSelect = document.createElement('select');
+						targetSelect.className = 'wsm-select wsm-target-select';
+						targetSelect.setAttribute('aria-label', t('target'));
+						for (const item of workspaces) {
+							const option = document.createElement('option');
+							option.value = item.workspaceId;
+							option.textContent = `${item.title} (${item.path})`;
+							targetSelect.append(option);
+						}
+						targetSelect.value = workspace.workspaceId;
+						overlay.querySelector('.wsm-target').textContent = '';
+						overlay.querySelector('.wsm-target').append(targetSelect);
+					}
+					const forkRow = overlay.querySelector(".wsm-fork-row");
+					const forkMode = overlay.querySelector(".wsm-fork-mode");
+					forkRow.hidden = false;
+					forkRow.querySelector(".wsm-label").textContent = t("forkMode") + "：";
+					for (const [label, value] of [[t("forkCurrentOnly"), "current-only"], [t("forkIncludeDescendants"), "include-descendants"]]) {
+						const option = document.createElement("option");
+						option.value = value;
+						option.textContent = label;
+						forkMode.append(option);
+					}
+					forkMode.value = "current-only";
 					const hint = overlay.querySelector(".wsm-hint");
-					hint.textContent = batchCount ? t("batchHint", { count: batchCount }) : t("hint");
+					hint.textContent = `${batchCount ? t("batchHint", { count: batchCount }) : t("hint")} ${t("previewBackupHelp")} ${t("forkHint")}`;
+					function renderPreview(plan) {
+						preview = plan;
+						if (!preview) return;
+						const statusLabels = {
+							safe: t("previewSafe"),
+							queued: t("previewQueued"),
+							blocked: t("previewBlocked"),
+							warning: t("previewWarningState")
+						};
+						const source = preview.source?.title || preview.source?.cwd || "—";
+						const target = preview.target?.path || selectedWorkspace.path || "—";
+						const warnings = Array.isArray(preview.warnings) ? preview.warnings.filter(Boolean).map(diagnosticText) : [];
+						const previewBox = overlay.querySelector(".wsm-preview");
+						previewBox.hidden = false;
+						previewBox.textContent = [
+							`${t("previewStatus")}: ${statusLabels[preview.status] || preview.status || "—"}`,
+							`${t("previewSource")}: ${source}`,
+							`${t("previewTarget")}: ${target}`,
+							`${t("previewBackup")}: ${formatPreviewBytes(preview.estimatedBackupBytes)}${preview.backup?.reused ? ` (${t("previewBackupReused")})` : ""}`,
+							warnings.length ? `${t("previewWarning")}: ${warnings.join("; ")}` : ""
+						].filter(Boolean).join("\n");
+						okBtn.disabled = preview.status === "blocked";
+					}
+					renderPreview(preview);
+					async function refreshPreview() {
+						const request = ++previewRequest;
+						selectedWorkspace = workspaces.find((item) => item.workspaceId === targetSelect.value);
+						okBtn.disabled = true;
+						const box = overlay.querySelector('.wsm-preview');
+						box.hidden = false;
+						box.textContent = t('doctorChecking');
+						try {
+							const plan = await loadPreview(selectedWorkspace.workspaceId, forkMode.value || 'current-only');
+							if (!closed && request === previewRequest) renderPreview(plan);
+						} catch (err) {
+							if (!closed && request === previewRequest) box.textContent = t('failed', { msg: errMsg(err) });
+						}
+					}
+					if (targetSelect) {
+						targetSelect.addEventListener('change', () => void refreshPreview());
+						forkMode.addEventListener('change', () => void refreshPreview());
+					}
 					// 有行无法识别时必须如实说明——用户点"确认"之前要知道这次只搬走了一部分。
 					if (unresolvedCount > 0) {
 						const warn = document.createElement("div");
@@ -616,12 +802,15 @@ window.__ModuleLoader__.load({
 					document.addEventListener("keydown", onKey);
 					function onKey(e) { if (e.key === "Escape") close(null); }
 					function close(value) {
+						closed = true;
 						overlay.remove();
 						document.removeEventListener("keydown", onKey);
 						resolve(value);
 					}
 					overlay.querySelector(".wsm-cancel").addEventListener("click", () => close(null));
-					okBtn.addEventListener("click", () => close(true));
+					okBtn.addEventListener("click", () => {
+						if (!okBtn.disabled) close({ mode: forkMode.value || "current-only", targetWorkspaceId: selectedWorkspace.workspaceId });
+					});
 					openDialog(overlay, close);
 				});
 			}
@@ -749,6 +938,7 @@ window.__ModuleLoader__.load({
 			const [trash, setTrash] = useState(null);
 			const [backups, setBackups] = useState(null);
 			const [tasks, setTasks] = useState(null);
+			const [migrations, setMigrations] = useState(null);
 			const [doctor, setDoctor] = useState(null);
 			const [query, setQuery] = useState("");
 
@@ -770,7 +960,7 @@ window.__ModuleLoader__.load({
 			const runScan = async () => {
 				setBusy(true);
 				try {
-					const [s, w, h, a, ar, tr, bp, tk] = await Promise.all([call("mover.scan"), call("mover.workspaces"), call("mover.history"), call("mover.ws.audit"), call("mover.archived"), call("mover.trash.list"), call("mover.backups.list"), call("mover.tasks.list")]);
+					const [s, w, h, a, ar, tr, bp, tk, mq] = await Promise.all([call("mover.scan"), call("mover.workspaces"), call("mover.history"), call("mover.ws.audit"), call("mover.archived"), call("mover.trash.list"), call("mover.backups.list"), call("mover.tasks.list"), call("mover.migrations.list")]);
 					setScan(s);
 					setWorkspaces(w.items ?? []);
 					setHistory(h.items ?? []);
@@ -779,6 +969,7 @@ window.__ModuleLoader__.load({
 					setTrash(tr);
 					setBackups(bp);
 					setTasks(tk);
+					setMigrations(mq);
 				} catch (err) {
 					setNote(t("failed", { msg: errMsg(err) }));
 				} finally {
@@ -1280,6 +1471,50 @@ window.__ModuleLoader__.load({
 				}
 			};
 
+			const migrationRetry = async (task) => {
+				setBusy(true);
+				setNote("");
+				try {
+					await call("mover.migrations.retry", { taskId: task.id });
+					setNote(t("queueRetryDone"));
+					refreshWorkspaces();
+					await runScan();
+				} catch (err) {
+					failNote(err);
+				} finally {
+					setBusy(false);
+				}
+			};
+
+			const migrationRetryAll = async (taskIds) => {
+				setBusy(true);
+				setNote("");
+				try {
+					const result = await call("mover.migrations.retry", { taskIds });
+					setNote(t("queueRetryAllDone", { n: result.retried ?? 0 }));
+					refreshWorkspaces();
+					await runScan();
+				} catch (err) {
+					failNote(err);
+				} finally {
+					setBusy(false);
+				}
+			};
+
+			const migrationCancel = async (task) => {
+				setBusy(true);
+				setNote("");
+				try {
+					await call("mover.migrations.cancel", { taskId: task.id });
+					setNote(t("queueCancelled"));
+					await runScan();
+				} catch (err) {
+					failNote(err);
+				} finally {
+					setBusy(false);
+				}
+			};
+
 			// 数据保护：按时间清理回收站与备份（dryRun 先出数字，确认后才真删）
 			const dataCleanup = async () => {
 				setBusy(true);
@@ -1308,6 +1543,7 @@ window.__ModuleLoader__.load({
 			const orphaned = items.filter((it) => it.status === "orphaned");
 			const unregistered = items.filter((it) => it.status === "unregistered");
 			const misfiled = items.filter((it) => it.status === "misfiled");
+			const unreadable = items.filter((it) => it.status === "unreadable");
 			const brokenWorkspaces = (audit?.items ?? []).filter((it) => it.status !== "ok");
 			const emptyWorkspaces = workspaces.filter((w) => (w.rawSessionCount ?? 0) === 0);
 			const archivedItems = archived?.items ?? [];
@@ -1328,10 +1564,14 @@ window.__ModuleLoader__.load({
 			const orphanedV = orphaned.filter(matchesQuery);
 			const unregisteredV = unregistered.filter(matchesQuery);
 			const misfiledV = misfiled.filter(matchesQuery);
+			const unreadableV = unreadable.filter(matchesQuery);
 			const archivedV = archivedItems.filter(matchesQuery);
 			const trashV = trashItems.filter(matchesQuery);
 			const backupV = backupItems.filter(matchesQuery);
 			const taskV = taskItems.filter((it) => matchesQuery({ ...it, title: null, cwd: it.targetPath }));
+			const migrationItems = migrations?.items ?? [];
+			const migrationV = migrationItems.filter((it) => !["done", "cancelled"].includes(it.state)).filter((it) => matchesQuery({ ...it, cwd: it.targetWorkspaceId }));
+			const failedMigrationIds = migrationV.filter((it) => it.state === "failed").map((it) => it.id);
 			const capCount = (shown, total) => (q ? `${shown}/${total}` : `${total}`);
 			const counts = scan?.counts ?? {};
 			const summaryParts = [
@@ -1363,7 +1603,7 @@ window.__ModuleLoader__.load({
 					doctor.checks.map((c) => h("div", { className: "wsm-item", key: c.id },
 						h("span", { className: "wsm-badge" + (c.state === "fail" ? " err" : c.state === "warn" ? " warn" : "") },
 							c.state === "pass" ? "✓" : c.state === "warn" ? "⚠" : "✗"),
-						h("span", { className: "wsm-cwd", title: c.detail }, t(`doctor${c.id.split("-").map((w) => w[0].toUpperCase() + w.slice(1)).join("")}`) + (c.detail ? ` — ${c.detail}` : ""))
+						h("span", { className: "wsm-cwd", title: diagnosticText(c.detail), style: { whiteSpace: "normal", overflow: "visible", overflowWrap: "anywhere" } }, t(`doctor${c.id.split("-").map((w) => w[0].toUpperCase() + w.slice(1)).join("")}`) + (c.detail ? ` — ${diagnosticText(c.detail)}` : ""))
 					))
 				) : null,
 				brokenWorkspaces.length > 0 ? h(Caption, { text: t("wsSection"), help: t("wsHelp") }) : null,
@@ -1436,6 +1676,22 @@ window.__ModuleLoader__.load({
 							);
 						})
 					) : null,
+				unreadable.length > 0 ? h(Caption, { text: `${t("unreadable")} (${capCount(unreadableV.length, unreadable.length)})` }) : null,
+				unreadableV.length > 0 ? h("div", { className: "wsm-list" },
+					unreadableV.map((it) => {
+						const labels = {
+							unsupported: t("unsupportedFormat"),
+							"layout-unknown": t("layoutUnknown"),
+							"corrupt-data": t("corruptData")
+						};
+						return h("div", { className: "wsm-item", key: it.sessionId },
+							h("span", { className: "wsm-badge err" }, t("unreadable")),
+							h("span", { className: "wsm-mono" }, it.sessionId),
+							h("span", { className: "wsm-cwd", title: it.diagnosticDetail ?? "" },
+								`${labels[it.diagnostic] ?? t("layoutUnknown")}${it.diagnosticDetail ? ` — ${it.diagnosticDetail}` : ""}`)
+						);
+					})
+				) : null,
 				archivedItems.length > 0 ? h(Caption, { text: `${t("archivedCaption")} (${capCount(archivedV.length, archivedItems.length)})`, help: t("archivedHelp") }) : null,
 				// 扫描只解析最新 400 条档案，而归档会话通常很旧：大库上这里可能不是全部。
 				archived?.truncated && archivedV.length > 0
@@ -1532,6 +1788,22 @@ window.__ModuleLoader__.load({
 						h("button", { className: "wsm-btn small", disabled: busy, onClick: () => void taskForget(it) }, t("taskForgetBtn"))
 					))
 				) : null,
+				migrationV.length > 0 ? h(Caption, { text: `${t("queueCaption")} (${capCount(migrationV.length, migrationItems.filter((it) => !["done", "cancelled"].includes(it.state)).length)})`, help: t("queueHelp") }) : null,
+				failedMigrationIds.length > 1 ? h("div", { className: "wsm-scanrow" },
+					h("button", { className: "wsm-btn small primary", disabled: busy, onClick: () => void migrationRetryAll(failedMigrationIds) }, t("queueRetryAllBtn"))) : null,
+				migrationV.length > 0 ? h("div", { className: "wsm-list" },
+					migrationV.map((it) => h("div", { className: "wsm-item", key: it.id },
+						h("span", { className: "wsm-mono", title: it.sessionId }, it.title || shortId(it.sessionId)),
+						h("span", { className: `wsm-badge ${it.state === "failed" ? "err" : "warn"}` }, it.state),
+						h("span", { className: "wsm-cwd", title: it.lastError ?? "" }, it.lastError || `${t("previewTarget")}: ${it.targetWorkspaceId}`),
+						!["done", "cancelled", "retrying"].includes(it.state)
+							? h("button", { className: "wsm-btn small primary", disabled: busy, onClick: () => void migrationRetry(it) }, t("queueRetryBtn"))
+							: null,
+						!["done", "cancelled", "retrying"].includes(it.state)
+							? h("button", { className: "wsm-btn small", disabled: busy, onClick: () => void migrationCancel(it) }, t("queueCancelBtn"))
+							: null
+					))
+				) : null,
 				scan && (scan.recoveryCount ?? 0) > 0
 					? h("div", { className: "wsm-note", style: { color: "var(--dsw-alias-state-error-primary,#dc2626)", marginTop: "10px" } }, t("recoveryNote", { n: scan.recoveryCount }))
 					: null,
@@ -1608,8 +1880,8 @@ window.__ModuleLoader__.load({
 				console.warn("[workspace-mover] status probe failed (will retry per move):", err);
 			});
 
-			async function fetchWorkspaces() {
-				if (wsCache && Date.now() - wsCache.at < 3000) return wsCache.items;
+			async function fetchWorkspaces(fresh = false) {
+				if (!fresh && wsCache && Date.now() - wsCache.at < 3000) return wsCache.items;
 				const res = await rpcCall("mover.workspaces");
 				if (!res?.ok) throw new Error(res?.error?.message ?? "workspace list unavailable");
 				wsCache = { items: res.value.items, at: Date.now() };
@@ -1692,7 +1964,7 @@ window.__ModuleLoader__.load({
 			 */
 			function rowSessionId(rowEl) {
 				try {
-					const fiberKey = Object.keys(rowEl).find((k) => k.startsWith("__reactFiber$"));
+					const fiberKey = Object.getOwnPropertyNames(rowEl).find((k) => k.startsWith("__reactFiber$"));
 					if (!fiberKey) return null;
 					for (let fiber = rowEl[fiberKey]; fiber; fiber = fiber.return) {
 						const node = fiber.memoizedProps?.node;
@@ -1836,10 +2108,15 @@ window.__ModuleLoader__.load({
 			}
 
 			function headerText(rowEl) {
+				const ownText = (node) => {
+					if (node !== rowEl && node?.getAttribute?.('role') === 'treeitem') return '';
+					if (node?.nodeType === 3) return node.textContent ?? node._text ?? '';
+					return [...(node?.childNodes ?? [])].map(ownText).join(' ');
+				};
 				return normalizeHeaderText([
 					rowEl?.getAttribute?.("aria-label"),
 					rowEl?.getAttribute?.("title"),
-					rowEl?.textContent
+					ownText(rowEl)
 				].filter(Boolean).join(" "));
 			}
 
@@ -1870,10 +2147,34 @@ window.__ModuleLoader__.load({
 			 */
 			function resolveWorkspace(rowEl, items) {
 				const list = Array.isArray(items) ? items : [];
-				if (!rowEl || isUngroupedHeader(rowEl)) return null;
+				if (!rowEl) return null;
+				// Read the rendered identity first: React may retain old fiber props after updates.
+				const rowKey = rowEl.getAttribute?.('data-row-key');
+				if (rowKey?.startsWith('workspace:')) {
+					return list.find((item) => `workspace:${item.workspaceId}` === rowKey) ?? null;
+				}
+				if (isUngroupedHeader(rowEl)) return null;
+				// DSH 0.2 ProjectRowItem carries the actual workspace ID in group props.
+				// Prefer identity over visible text, which can contain nested session titles.
+				try {
+					const fiberKey = Object.getOwnPropertyNames(rowEl).find((key) => key.startsWith('__reactFiber$'));
+					for (let fiber = fiberKey ? rowEl[fiberKey] : null; fiber; fiber = fiber.return) {
+						const group = fiber.memoizedProps?.group;
+						if (group && Object.hasOwn(group, 'workspaceId')) {
+							return list.find((item) => item.workspaceId === group.workspaceId) ?? null;
+						}
+					}
+				} catch { /* Older clients can use unique text evidence below. */ }
 				const text = headerText(rowEl);
-				const byText = list.find((item) => headerMatchesWorkspace(text, item));
-				if (byText) return byText;
+				const byText = list.filter((item) => headerMatchesWorkspace(text, item));
+				if (byText.length === 1) return byText[0];
+				if (byText.length > 1) {
+					const labels = [rowEl.getAttribute?.('aria-label'), rowEl.getAttribute?.('title'), text]
+						.map((value) => normalizeHeaderText(value).toLocaleLowerCase()).filter(Boolean);
+					const exact = byText.filter((item) => [item.title, item.path].some((value) =>
+						value && labels.includes(normalizeHeaderText(value).toLocaleLowerCase())));
+					return exact.length === 1 ? exact[0] : null;
+				}
 				const unidentifiable = list.filter((item) => !normalizeHeaderText(item?.title) && !normalizeHeaderText(item?.path));
 				if (unidentifiable.length === 1) return unidentifiable[0];
 				return null;
@@ -1895,7 +2196,7 @@ window.__ModuleLoader__.load({
 				clearHints();
 				if (!dragging) return;
 				const header = headerRow(e.target);
-				if (!header || isUngroupedHeader(header)) return;
+				if (!header || isUngroupedHeader(header)) { dragging.target = null; return; }
 				e.preventDefault(); // 允许在此投放（没有它 drop 根本不会触发）
 				header.classList.add("wsm-drop-hint");
 				if (!dragging.target || dragging.target.header !== header) {
@@ -1913,7 +2214,7 @@ window.__ModuleLoader__.load({
 				dragging = null;
 				clearHints();
 				if (!current) return;
-				const header = headerRow(e.target) ?? current.target?.header;
+				const header = headerRow(e.target);
 				if (!header || isUngroupedHeader(header)) return;
 				// 只拦截「拖到某个工作区标题行」的场景；其余交还官方逻辑
 				e.preventDefault();
@@ -1935,19 +2236,16 @@ window.__ModuleLoader__.load({
 				}
 
 				let workspace = null;
+				let workspaceItems = [];
 				try {
-					let items = await fetchWorkspaces();
+					let items = await fetchWorkspaces(true);
+					workspaceItems = items;
 					workspace = resolveWorkspace(header, items);
-					if (!workspace && current.target?.workspaceId) {
-						workspace = items.find((item) => String(item.workspaceId) === String(current.target.workspaceId)) ?? null;
-					}
 					if (!workspace) {
 						wsCache = null;
 						items = await fetchWorkspaces();
+						workspaceItems = items;
 						workspace = resolveWorkspace(header, items);
-						if (!workspace && current.target?.workspaceId) {
-							workspace = items.find((item) => String(item.workspaceId) === String(current.target.workspaceId)) ?? null;
-						}
 					}
 				} catch (err) {
 					return void toast(t("failed", { msg: errMsg(err) }), true);
@@ -1993,17 +2291,38 @@ window.__ModuleLoader__.load({
 				// ---- 单选：原有确认与 mover.move 路径 ----
 				if (sessions.length === 1) {
 					const { sessionId, sessionTitle } = sessions[0];
-					const confirmed = await confirmMove({ sessionId, sessionTitle, workspace, unresolvedCount });
-					if (!confirmed) return;
+					let preview = null;
 					try {
-						const res = await rpcCall("mover.move", { sessionId, sessionTitle, targetWorkspaceId: workspace.workspaceId });
+						const res = await rpcCall("mover.preview", { sessionId, targetWorkspaceId: workspace.workspaceId });
+						if (res?.ok) preview = res.value;
+					} catch (err) {
+						console.debug("[workspace-mover] preview unavailable:", err?.message ?? err);
+					}
+					const choice = await confirmMove({ sessionId, sessionTitle, workspace, workspaces: workspaceItems, unresolvedCount, preview,
+						loadPreview: async (targetWorkspaceId, mode) => {
+							const res = await rpcCall('mover.preview', { sessionId, targetWorkspaceId, mode });
+							if (!res?.ok || !res.value?.status) throw new Error(res?.error?.message ?? 'preview unavailable');
+							return res.value;
+						}
+					});
+					if (!choice) return;
+					workspace = workspaceItems.find((item) => item.workspaceId === choice.targetWorkspaceId);
+					try {
+						const res = await rpcCall("mover.move", { sessionId, sessionTitle, targetWorkspaceId: workspace.workspaceId, mode: choice.mode });
 						if (res?.ok) {
-							await reconcileWorkspaceProjection(ctx, workspace.workspaceId, [sessionId]);
-							toast(res.value?.attached ? t("selfHealed") : t("done", { title: workspace.title }));
-							scheduleRecencyFix(ctx, workspace.workspaceId, [sessionId]);
+							wsCache = null;
+							scanCache = null;
+							const movedIds = (res.value?.results ?? []).filter((item) => item?.ok).map((item) => item.sessionId).filter(Boolean);
+							await reconcileWorkspaceProjection(ctx, workspace.workspaceId, movedIds.length > 0 ? movedIds : [sessionId]);
+							toast(res.value?.queued ? t("queuedMove") : (res.value?.attached ? t("selfHealed") : t("done", { title: workspace.title })));
+							scheduleRecencyFix(ctx, workspace.workspaceId, movedIds.length > 0 ? movedIds : [sessionId]);
 							if (res.value?.restartHint) setTimeout(() => toast(t("restartHint"), true), 1200);
 						} else {
 							const msg = res?.error?.message ?? "unknown";
+							if (res?.error?.code === "busy") {
+								toast(t("queuedMove"));
+								return;
+							}
 							const rolled = res?.error?.code === "rollback-failed" || /roll/i.test(msg);
 							const text = (rolled ? t("rolledBack", { msg }) : t("failed", { msg }));
 							toast(text, true);
@@ -2015,21 +2334,41 @@ window.__ModuleLoader__.load({
 				}
 
 				// ---- 多选：批量确认 + mover.moveMany（逐条独立备份回滚）----
-				const confirmed = await confirmMove({ workspace, batchCount: sessions.length, unresolvedCount });
-				if (!confirmed) return;
+				let preview = null;
 				try {
-					const res = await rpcCall("mover.moveMany", { sessions, targetWorkspaceId: workspace.workspaceId });
+					const plans = (await Promise.all(sessions.map(async (item) => {
+						const res = await rpcCall("mover.preview", { sessionId: item.sessionId, targetWorkspaceId: workspace.workspaceId });
+						return res?.ok ? res.value : null;
+					}))).filter(Boolean);
+					const blocked = plans.filter((item) => item.status === "blocked").length;
+					const queued = plans.filter((item) => item.status === "queued").length;
+					const warnings = plans.flatMap((item) => item.warnings ?? []).filter(Boolean);
+					preview = {
+						...plans[0],
+						status: blocked === plans.length && plans.length > 0 ? "blocked" : (blocked > 0 || queued > 0 ? "warning" : "safe"),
+						source: { title: t("scannedN", { n: sessions.length }) },
+						estimatedBackupBytes: plans.reduce((sum, item) => sum + Number(item.estimatedBackupBytes || 0), 0),
+						warnings: [...new Set([...(blocked ? [`${blocked} blocked`] : []), ...(queued ? [`${queued} queued`] : []), ...warnings])]
+					};
+				} catch (err) {
+					console.debug("[workspace-mover] batch preview unavailable:", err?.message ?? err);
+				}
+				const choice = await confirmMove({ workspace, batchCount: sessions.length, unresolvedCount, preview });
+				if (!choice) return;
+				try {
+					const res = await rpcCall("mover.moveMany", { sessions, targetWorkspaceId: workspace.workspaceId, mode: choice.mode });
 					if (!res?.ok) {
 						const msg = res?.error?.message ?? "unknown";
 						const rolled = res?.error?.code === "rollback-failed" || /roll/i.test(msg);
 						return void toast((rolled ? t("rolledBack", { msg }) : t("failed", { msg })), true);
 					}
-					const { movedCount, attachedCount, failedCount } = res.value ?? {};
+					const { movedCount, attachedCount, failedCount, queuedCount } = res.value ?? {};
 					const okCount = (movedCount ?? 0) + (attachedCount ?? 0);
 					const movedIds = (res.value?.results ?? []).filter((item) => item?.ok).map((item) => item.sessionId).filter(Boolean);
 					await reconcileWorkspaceProjection(ctx, workspace.workspaceId, movedIds);
 					let message = t("batchDone", { n: okCount });
 					if ((failedCount ?? 0) > 0) message += t("batchFailTail", { n: failedCount });
+					if ((queuedCount ?? 0) > 0) message += t("batchQueuedTail", { n: queuedCount });
 					toast(message);
 					clearSelection(true);
 					scheduleRecencyFix(ctx, workspace.workspaceId, sessions.map((s) => s.sessionId));

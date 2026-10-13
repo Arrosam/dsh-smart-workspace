@@ -562,6 +562,135 @@ test('工作区解析必须自证：标题与路径都不匹配时不得按 DOM 
   assert.equal(calls.length, 0, '标题与路径都不匹配时必须中止，不得按序号回退');
 });
 
+test('工作区身份优先于标题：移入后仍可拖回原工作区', async () => {
+  resetDom();
+  mount();
+  const row = sessionRow('Alpha discussion', 'session-aaa');
+  const beta = header('proj-beta');
+  const alpha = header('proj-beta'); // Simulate stale visible text after a sidebar update.
+  Object.defineProperty(alpha, '__reactFiber$t', { value: {
+    memoizedProps: { group: { workspaceId: 'wid-a' } }, return: null
+  } });
+  fixture({ rows: [row] });
+  attach(beta, alpha);
+  await dragDrop(row, beta, 'session-aaa');
+  await dragDrop(row, alpha, 'session-aaa');
+  assert.deepEqual(moveCalls().map((call) => call.payload.targetWorkspaceId), ['wid-b', 'wid-a']);
+});
+
+test('工作区 data-row-key 优先于包含其他工作区名称的文字', async () => {
+  resetDom();
+  mount();
+  const row = sessionRow('Alpha discussion', 'session-aaa');
+  const beta = header('proj-alpha proj-beta');
+  beta.setAttribute('data-row-key', 'workspace:wid-b');
+  Object.defineProperty(beta, '__reactFiber$t', { value: {
+    memoizedProps: { group: { workspaceId: 'wid-a' } }, return: null
+  } }); // Rendered DOM identity must win over stale React props.
+  fixture({ rows: [row] });
+  attach(beta);
+  await dragDrop(row, beta, 'session-aaa');
+  assert.equal(moveCalls()[0]?.payload.targetWorkspaceId, 'wid-b');
+});
+
+test('嵌套会话标题不会被用作目标工作区名称', async () => {
+  resetDom();
+  mount();
+  const row = sessionRow('Alpha discussion', 'session-aaa');
+  const beta = header('proj-beta');
+  beta.appendChild(sessionRow('proj-alpha', 'session-other'));
+  fixture({ rows: [row] });
+  attach(beta);
+  await dragDrop(row, beta, 'session-aaa');
+  assert.equal(moveCalls()[0]?.payload.targetWorkspaceId, 'wid-b');
+});
+
+test('工作区文字匹配有歧义时停止迁移', async () => {
+  resetDom();
+  mount();
+  const row = sessionRow('Alpha discussion', 'session-aaa');
+  const ambiguous = header('proj-alpha proj-beta');
+  fixture({ rows: [row] });
+  attach(ambiguous);
+  await dragDrop(row, ambiguous, 'session-aaa');
+  assert.equal(moveCalls().length, 0);
+});
+
+test('落在标题外时不沿用上次悬停的工作区', async () => {
+  resetDom();
+  mount();
+  const row = sessionRow('Alpha discussion', 'session-aaa');
+  const beta = header('proj-beta');
+  fixture({ rows: [row] });
+  attach(beta);
+  const dt = { getData: () => 'session-aaa' };
+  dispatch({ type: 'dragstart', target: row, dataTransfer: dt });
+  dispatch({ type: 'dragover', target: beta, preventDefault() {} });
+  await new Promise((r) => setTimeout(r, 0));
+  dispatch({ type: 'drop', target: doc._body, dataTransfer: dt, preventDefault() {}, stopImmediatePropagation() {} });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(doc._body.querySelector('.wsm-overlay'), null);
+  assert.equal(moveCalls().length, 0);
+});
+
+test('同工作区预览阻断后可显式选择原工作区并重新预览再移回', async () => {
+  resetDom();
+  mount();
+  const row = sessionRow('Alpha discussion', 'session-aaa');
+  const beta = header('proj-beta');
+  const { ws } = fixture({ rows: [row] });
+  attach(beta);
+  setResponder((endpoint, payload) => {
+    if (endpoint === 'mover.workspaces') return { ok: true, value: { items: ws } };
+    if (endpoint === 'mover.preview') return { ok: true, value: {
+      status: payload.targetWorkspaceId === 'wid-b' ? 'blocked' : 'safe',
+      source: { cwd: 'C:/proj-beta' },
+      target: { path: ws.find((item) => item.workspaceId === payload.targetWorkspaceId).path },
+      warnings: [], estimatedBackupBytes: 123
+    } };
+    return { ok: true, value: {} };
+  });
+  await dragDrop(row, beta, 'session-aaa', { confirm: false });
+  const select = doc._body.querySelector('.wsm-target-select');
+  const ok = doc._body.querySelector('.wsm-ok');
+  assert.equal(ok.disabled, true);
+  select.value = 'wid-a';
+  dispatch({ type: 'change', target: select });
+  assert.equal(ok.disabled, true, 'Must wait for the new preview');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(ok.disabled, false);
+  assert.match(doc._body.querySelector('.wsm-preview').textContent, /目标路径: C:\/proj-alpha/);
+  dispatch({ type: 'click', target: ok });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(moveCalls()[0]?.payload.targetWorkspaceId, 'wid-a');
+});
+
+test('切换目标后预览失败时禁止按旧预览执行', async () => {
+  resetDom();
+  mount();
+  const row = sessionRow('Alpha discussion', 'session-aaa');
+  const beta = header('proj-beta');
+  const { ws } = fixture({ rows: [row] });
+  attach(beta);
+  setResponder((endpoint, payload) => {
+    if (endpoint === 'mover.workspaces') return { ok: true, value: { items: ws } };
+    if (endpoint === 'mover.preview') return payload.targetWorkspaceId === 'wid-a'
+      ? { ok: false, error: { message: 'preview failed' } }
+      : { ok: true, value: { status: 'safe', source: { cwd: 'C:/proj-alpha' } } };
+    return { ok: true, value: {} };
+  });
+  await dragDrop(row, beta, 'session-aaa', { confirm: false });
+  const select = doc._body.querySelector('.wsm-target-select');
+  select.value = 'wid-a';
+  dispatch({ type: 'change', target: select });
+  await new Promise((r) => setTimeout(r, 0));
+  const ok = doc._body.querySelector('.wsm-ok');
+  assert.equal(ok.disabled, true);
+  dispatch({ type: 'click', target: ok });
+  assert.equal(moveCalls().length, 0);
+  dispatch({ type: 'click', target: doc._body.querySelector('.wsm-cancel') });
+});
+
 test('弹窗 Escape 关闭并释放 keydown 监听器', async () => {
   resetDom();
   mount();

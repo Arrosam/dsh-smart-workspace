@@ -11,7 +11,7 @@
     <a href="https://github.com/PianoPrince/dsh-workspace-mover/actions/workflows/test.yml"><img alt="CI" src="https://github.com/PianoPrince/dsh-workspace-mover/actions/workflows/test.yml/badge.svg" style="height:20px; margin:0 2px;" /></a>
     <a href="https://www.npmjs.com/package/dsh-workspace-mover"><img alt="npm version" src="https://img.shields.io/npm/v/dsh-workspace-mover" style="height:20px; margin:0 2px;" /></a>
     <a href="https://www.npmjs.com/package/dsh-workspace-mover"><img alt="npm weekly downloads" src="https://img.shields.io/npm/dw/dsh-workspace-mover" style="height:20px; margin:0 2px;" /></a>
-    <img alt="plugin version" src="https://img.shields.io/badge/dsh--plugin-2.2.0-4d6bfe" style="height:20px; margin:0 2px;" />
+    <img alt="plugin version" src="https://img.shields.io/badge/dsh--plugin-2.3.0-4d6bfe" style="height:20px; margin:0 2px;" />
     <img alt="DSH tested 0.2.0-rc.2" src="https://img.shields.io/badge/DSH_tested-0.2.0--rc.2-4c8dff" style="height:20px; margin:0 2px;" />
     <img alt="Node" src="https://img.shields.io/badge/Node-%E2%89%A522-339933" style="height:20px; margin:0 2px;" />
   </p>
@@ -58,10 +58,12 @@ DeepSeek Harness's sidebar supports drag-to-reorder **within** a workspace, but 
 - **🚚 True move · zero tokens**: session id and full history are preserved as-is — no duplicates, no context re-injection
 - **🏠 Move-home wizard**: after a project folder was moved or renamed, re-point the broken workspace in place; id, title, order, and archive flags stay, and member sessions plus strays migrate together
 - **🛟 Session rescue** (Settings → Session Rescue): recover lost / unregistered / misfiled sessions; restore archived sessions; one-click repair and filtering
-- **🗑️ Recycle bin and backups**: deletes go to the recycle bin first and can be restored; every move creates a backup you can restore or clean up
-- **🛡️ Data protection**: recycle bin and backup counts / footprint at a glance; "clean data older than 30 days" previews the freed space before asking for confirmation
+- **🗑️ Recycle bin and backups**: deletes go to the recycle bin first and can be restored; migrations create recovery snapshots that can be restored or cleaned up
+- **🛡️ Data protection**: identical session content keeps one physical snapshot, so back-and-forth moves do not grow storage without bound; every move still appears in history with snapshot counts and footprint visible
 - **⏪ Move history and undo**: last 100 cross-workspace moves; bulk operations aggregate into one undoable entry
 - **🧾 Task center**: bulk moves persist per-item state (done/failed, last error and attempt time); failed items retry in one click — from each session's CURRENT location, never a stale path
+- **⏳ Busy-session queue**: running sessions are never touched; queued work is persistent, with per-item cancel/retry and batch retry for failed items
+- **🔎 Migration preview**: before confirmation, show source, target path, collisions, running state, adapter mode, and estimated new backup bytes; reuse is called out when a matching snapshot already exists
 - **📂 Empty-group cleanup / open folder**: only truly empty workspaces are listed; open a group directory in your file manager
 - **🤖 Agent tools**: four model-callable tools — `mover_list_sessions` / `mover_move_session` / `mover_repair_sessions` / `mover_doctor` — so "move this session to group X" in the conversation runs the same backup-first pipeline as the panel; mutating tools ask for user approval first, and hosts without `dsh-tools` skip them automatically
 
@@ -219,13 +221,31 @@ Built to coexist: private communication/style namespaces, no rewrites of officia
 
 ## 🧩 Compatibility and uninstall
 
+### Why does the storage adapter show a warning?
+
+DSH currently exposes no public raw archive path or raw-byte relocation API. The plugin uses the host storage root and checked JSONL layout, reported as `filesystem-fallback`. This is a compatibility warning; check the storage-layout result as well. Run doctor again after host upgrades and stop migration if the layout is unknown or damaged. Handle-only providers without physical paths cannot relocate archives.
+
+Recovery snapshots are separate from primary archives. A reused snapshot retains its original saved path; restoration uses that path unless another workspace is selected. History does not guarantee indefinite snapshot retention: policy limits or manual cleanup can remove a referenced snapshot.
+
 ### Version compatibility matrix
 
 | Plugin version | Verified DeepSeek Harness | Node | Notes |
 |----------------|---------------------------|------|-------|
-| 2.1.0 | `0.1.5-rc.1`, `0.1.5-rc.2`, **`0.2.0 desktop`** (0.2.0-rc.2 core) | `≥22` | Agent tools + desktop verified in real use (drag move, confirm dialog, hot-reload fix); tools auto-skip on hosts without `dsh-tools` |
+| 2.3.0 | `0.2.0-rc.2` Desktop (partial user verification) | `≥22` | Idle migration and snapshot reuse confirmed; Web, queue process restart, and full runtime smoke pending |
+| 2.2.0 | `0.1.5-rc.1`, `0.1.5-rc.2`, **`0.2.0 desktop`** (0.2.0-rc.2 core) | `≥22` | Storage-layout check; Agent tools + desktop verified; tools auto-skip on hosts without `dsh-tools` |
 | 2.0.3 | `0.1.5-rc.1`, `0.1.5-rc.2` | `≥22` | True move / bulk / rescue / recycle bin / backups; first npm publish |
 | — | `0.2.0 web` (0.2.0-rc.2) | `≥22` | Same core as the desktop build, adapted on the same code paths; web boot regression pending |
+
+### Session archive format validation
+
+“Local pass” below means repository sandbox fixtures, not an official DSH runtime test. Desktop idle migration and snapshot reuse have user confirmation; remaining runtime checks are pending; see the [compatibility report](docs/compatibility/dsh-0.2.0-rc.2-2026-10-13.md).
+
+| Archive layout | Local sandbox | Official DSH runtime |
+| --- | --- | --- |
+| v3 / v4 Zstd | Move and undo pass; highest generation selected while older files are preserved | Pending |
+| Legacy / v3 plain JSONL | Move and undo pass without upgrading the generation | Pending |
+| Mixed compression encodings | Explicitly rejected | Pending |
+| Filename/header generation mismatch | Rejected before move when the header declares a generation; bytes remain unchanged | Pending |
 
 - **Engines**: `package.json` → `engines.dsh` ≥ `0.1.5-rc.1`, `engines.node` ≥ `22` (aligned with the CI Node 22/24 matrix).
 - **Other known combination**: dsh-market `1.45.1`. Does not patch DSH source; official extension points only.
@@ -234,6 +254,7 @@ Built to coexist: private communication/style namespaces, no rewrites of officia
 - **DSH 0.2 preset migration**: 0.2 no longer reads the 0.1.x legacy custom-preset directory (`$DSH_HOME\.agent-presets\`); resuming old sessions fails with `Unknown agent preset` (a host change, unrelated to this plugin). Migration steps and a real-world record: [docs/dsh-0.2-preset-migration.md](docs/dsh-0.2-preset-migration.md).
 - **Uninstall is reversible**: removing the plugin does not delete session archives, workspaces, or official bookkeeping. Plugin history/tasks/backups/recycle-bin data stay in the plugin data directory (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)); refresh or restart DSH to clear injected UI.
 - **Coexistence**: do not enable a second cross-workspace drag mover; other categories can follow the table above.
+- **Storage fallback is visible**: `mover.status` reports `filesystem-fallback`, `official-handle`, or `unavailable`. Handle-only providers remain diagnostic/preview capable, while physical moves fail explicitly with `unsupported` instead of guessing a path.
 
 Some advanced actions need newer DSH capabilities; when unavailable the UI says so instead of failing silently.
 
@@ -251,7 +272,8 @@ Every migration runs through the same safety-bounded pipeline: **byte-level back
 
 **Concrete guarantees:**
 
-- **Automatic backup before every move**; after landing, the session identity and path are re-checked — mismatch rolls the whole move back;
+- **Automatic recovery snapshot before every move**; identical content (ignoring migration-only `cwd` changes) reuses an existing snapshot, then the landed session identity and path are re-checked — mismatch rolls the whole move back;
+- **Every move remains in history** with source, target, and the snapshot used, so deduplication never hides the operation trail;
 - **On failure, restore to the pre-move state** (files and bookkeeping together);
 - **Deletes go to the recycle bin first** and can be restored to the original spot or any group; permanent delete needs a second confirmation;
 - **If automatic recovery is not possible**, the rescue panel flags it for manual review; session files and backups are kept;
@@ -270,6 +292,15 @@ Every migration runs through the same safety-bounded pipeline: **byte-level back
 
 ## 🆕 Recent version
 
+### v2.3.0 · 2026-10-13
+
+- **Reusable recovery snapshots**: identical content reuses an existing snapshot, ignoring migration-only `cwd` changes. Changed content creates a new backup. Every move retains its source, target, and snapshot reference in history; up to 20 physical snapshots are retained by default, with legacy backups supported.
+- **Clearer preview**: shows actual source, target path, collisions, running state, and newly required backup bytes. Reuse is explicit. A workspace selector fixes incorrect return-move targets.
+- **Busy-session queue**: running sessions remain untouched and wait in a persistent queue for idle. Cancel and individual/batch retry are available; real DSH process-restart recovery remains unverified.
+- **Storage and format diagnostics**: reports adapter mode and degradation reasons. Sandbox coverage includes v3/v4 and plain/Zstd, unsupported formats, unknown layouts, and damaged data without forced upgrades.
+- **Branch and portable-bundle APIs**: optional descendant selection, export, checksums, and dry-run import. Conflicts and known insufficient space block import. These features have sandbox coverage but remain unverified in a real runtime.
+- **Recovery fixes**: default restoration selects the newest backup; bundle space estimates include attachments. Added the npm weekly downloads badge.
+
 ### v2.2.0 · 2026-10-09
 
 - **Batch moves no longer *guess* a session's identity**: when the authoritative id channel is unavailable, the old fallback substituted the next id in order; unresolvable rows are now skipped and reported in the confirm dialog, and a move with nothing resolvable aborts without touching any file
@@ -278,7 +309,7 @@ Every migration runs through the same safety-bounded pipeline: **byte-level back
 - **Storage-layout self-check**: one real session's directory is reverse-derived and verified, surfacing in `mover.status` and the Doctor panel (`data-layout`) so "one day everything is unfindable" becomes a visible degraded state instead
 - **Orphan backups are visible and cleanable**: a purged session left up to 20 migration backups on disk forever; orphans are now flagged with one-click cleanup, and "purge" offers to remove them too
 - **Archived list explains truncation**: the scan parses only the newest 400 archives, so older archived sessions can be missing — the UI now says so
-- **Tunable policies**: backup retention / history length / batch cap / repoint cap / scan cap / cleanup age accept environment overrides (`DSH_WORKSPACE_MOVER_*`)
+- **Tunable policies**: physical snapshot retention / history length / batch cap / repoint cap / scan cap / cleanup age accept environment overrides (`DSH_WORKSPACE_MOVER_*`)
 - **Official APIs replace private coupling**: unarchive uses the official `registry.unarchiveSession` (with a fallback path); title sync uses official `entity.setTitle` and is decoupled from the path redirect; `record.sessionIds` reads are consolidated into one accessor
 - **Accessibility and copy**: dialogs gain `aria-labelledby`, initial focus and a Tab trap; Esc respects "not while typing in the composer"; dead strings removed and two hard-coded English strings localized, with a zh/en key-parity warning
 - **Ecosystem metadata**: `screenshots.json` lets the plugin control its storefront card; host-package `peerDependencies` are declared as `*` and optional (metadata only — the real floor is `engines.dsh`, and any runtime mismatch is reported through capability flags); long-standing tool-count and compatibility drift in the READMEs/ARCHITECTURE is corrected

@@ -35,6 +35,7 @@ Single logical channel `/workspace-mover` via `ctx.connection.rpc.handle('/works
 | `mover.status` | Capability report (detected services / degraded items) plus `storageLayout`, `degradedFeatures`, and the `unarchiveApi` / `setTitleApi` flags |
 | `mover.workspaces` | List workspaces |
 | `mover.move` | Single-session true move |
+| `mover.preview` | Read-only migration preview: source/target, collision, running state, adapter and estimated new snapshot bytes; `backup.reused` identifies an existing matching snapshot |
 | `mover.moveMany` | Bulk move (≤ `batchLimit`, default 50) |
 | `mover.scan` | Classified rescue scan (parses the newest `scanLimit`, default 400; reports `scanned` vs `scannedParsed`) |
 | `mover.repair` | Attach / relink / home one item |
@@ -47,8 +48,10 @@ Single logical channel `/workspace-mover` via `ctx.connection.rpc.handle('/works
 | `mover.openFolder` | Open group directory in OS file manager |
 | `mover.session.delete` | Session → recycle bin; optional `purgeBackups: true` also deletes that session's migration backups |
 | `mover.trash.list` / `mover.trash.restore` / `mover.trash.purge` | Recycle bin; `purge` accepts optional `purgeBackups: true` |
-| `mover.backups.list` / `mover.backups.restore` / `mover.backups.deleteOne` | Backup management; `list` reports `orphan` per group plus `orphanGroups` / `orphanBytes` |
+| `mover.backups.list` / `mover.backups.restore` / `mover.backups.deleteOne` | Recovery-snapshot management; `list` reports `orphan` per group, physical `count`, plus `orphanGroups` / `orphanBytes` |
 | `mover.tasks.list` / `mover.tasks.retry` / `mover.tasks.forget` | Migration task center |
+| `mover.migrations.enqueue` / `mover.migrations.list` / `mover.migrations.retry` / `mover.migrations.cancel` | Persistent busy-session queue; `retry` accepts one `taskId` or a `taskIds` batch, with per-item failure isolation |
+| `mover.bundle.export` / `mover.bundle.inspect` / `mover.bundle.import` | Portable Bundle export, dry-run inspection, and import through the adapter/backup pipeline |
 | `mover.data.cleanup` | Dry-run and clean aged plugin data (default age = `cleanupDays`) |
 
 ### Tunable policies
@@ -57,7 +60,7 @@ Single logical channel `/workspace-mover` via `ctx.connection.rpc.handle('/works
 
 | Policy | Default | Environment override |
 | --- | --- | --- |
-| backup retention per session | 20 | `DSH_WORKSPACE_MOVER_BACKUP_KEEP` |
+| physical snapshot retention per session | 20 | `DSH_WORKSPACE_MOVER_BACKUP_KEEP` |
 | move history length | 100 | `DSH_WORKSPACE_MOVER_HISTORY_LIMIT` |
 | batch cap (move / repair) | 50 | `DSH_WORKSPACE_MOVER_BATCH_LIMIT` |
 | repoint cap | 200 | `DSH_WORKSPACE_MOVER_REPOINT_LIMIT` |
@@ -102,17 +105,22 @@ When the host provides the `tools` service, `apply()` registers four plain (zero
 - `exec.signal` propagates into the RPC layer; cancellation lets the in-flight step finish rolling back to a consistent state.
 - Hosts without `dsh-tools` skip registration silently; `mover.status` reports the `agentTools` flag.
 
-## Session archives (v3)
+## Session archives and storage adapter
 
-- Naming: `session.v3.jsonl.zstd` or `session.v3.jsonl` (highest generation wins).
-- Mixed compression in one persistence root is rejected explicitly.
+- The fallback filesystem adapter recognizes names `session.jsonl[.zstd]` and `session.vN.jsonl[.zstd]`; it selects the highest generation without rewriting older files to v3.
+- A mixed plain/Zstd directory and a file whose compression differs from the host's configured mode are rejected explicitly. Mixed compression elsewhere under the same root is diagnosed per session, not by a root-wide scan.
+- v3/v4 filenames are recognized, but a v4 runtime fixture has not yet been verified. Filename/header mismatch is rejected only when the header contains one of the generation fields currently recognized by the adapter.
 - True move keeps the session id and all frames; only the header `cwd` (first frame) is rewritten; other frames stay byte-identical. Publish via temp file + atomic rename.
 
 ### The storage-layout assumption, and its self-check
 
-The whole pipeline rests on two **undocumented** assumptions: that `persistence.root` exists (`SessionPersistence`'s documented surface is `create`/`open`/`stat`/`list`), and that the on-disk directory layout equals this plugin's local port of `projectKey` / `encodeSegment`. If a host changes either, `sessionDir()` silently points at a path that does not exist — presenting as "every session is unfindable" with no diagnostic.
+The adapter first reports the public `list` / `stat` / `open` surface. When a provider also exposes a physical root, the plugin uses the legacy directory adapter as a visible `filesystem-fallback`; when only official handles are available it stays read/diagnostic capable and marks physical moves as `unsupported` instead of guessing a path.
 
 `verifyStorageLayout(ctx)` closes that gap: it takes up to five real headers from `persistence.list()`, reverse-derives each session's directory with this plugin's own encoding, and confirms an archive is actually there. Result states are `ok` / `degraded` / `empty` (no sessions to verify) / `unavailable`. It is exposed as `mover.status.capabilities.storageLayout` plus a `data-layout` check in `mover_doctor`, is strictly read-only, and never throws (any error degrades to a warning).
+
+`mover.status.capabilities.storageAdapter` is `filesystem-fallback`, `official-handle`, or `unavailable`; `storageApi`, `physicalPath`, and `migrationQueueState` expose the exact degradation and queue state. `mover_doctor` reports the same adapter under `storage-adapter` and checks the durable migration records under `data-migrations`.
+
+Portable Bundles contain `manifest.json`, `sessions/`, `attachments/`, `checksums.json`, and `workspace-metadata.json`. Import defaults to dry-run and reports id conflicts, missing attachments, compression incompatibilities, required/free space, and recoverable files. Execution refuses a blocked plan, backs up each artifact, verifies the rewritten header, and isolates failures per session. Attachment files are preserved and copied into the imported session directory; the bundle report calls out any missing file.
 
 ## Move pipeline
 
@@ -120,7 +128,7 @@ Order of operations for a cross-workspace move:
 
 1. **Running check** — reject only mid-turn sessions (`agents.get(id)?.status === 'running'`); idle resident sessions may move.
 2. **Read authority header** from disk; verify target ≠ source.
-3. **Byte backup** to `$DSH_HOME/workspace-mover/backups/` (rolling `backupKeep` per session, default 20) **before any side effect** — a backup failure aborts with `backup-failed` and nothing has been touched.
+3. **Recovery snapshot** to `$DSH_HOME/workspace-mover/backups/` (up to `backupKeep` distinct physical files per session, default 20) **before any side effect**. The content fingerprint ignores the migration-only header `cwd`, so a move back and forth reuses the existing snapshot. A backup failure aborts with `backup-failed` and nothing has been touched.
 4. **Preflight** — dual-accounting detect, target writability probe, disk-space hint.
 5. **Rewrite first frame** (header cwd) only.
 6. **Move directory** (Windows: exponential-backoff retry on EPERM; fallback copy+delete).
@@ -129,7 +137,7 @@ Order of operations for a cross-workspace move:
 9. **Verify** — read archive back; id + cwd must match or the move fails.
 10. **Rollback on any failure** — restore live header + index snapshot → original bytes back to source dir → reattach source workspace.
 
-Concurrency: same session / same target workspace try-acquire a lock; concurrent ops return `busy` (never queue). Bulk moves de-duplicate first.
+Concurrency: same session / same target workspace try-acquire a lock. A running session returns `busy` to the transaction layer and is persisted in `migrations.json` as `waiting-for-idle`; the queue wakes every few seconds and on the next plugin start. Bulk moves de-duplicate first and isolate each result.
 
 If “rollback also failed”, a durable recovery record is written and shown as a red manual-recovery row. Session files and backups stay in place — never auto-deleted.
 
@@ -151,7 +159,7 @@ All plugin metadata lives under `$DSH_HOME/workspace-mover/` and never overwrite
 
 | Path | Use |
 | --- | --- |
-| `backups/` | Byte-level pre-move backups |
+| `backups/` | Byte-level recovery snapshots; new files include a SHA-256 content fingerprint, while legacy timestamp-only names remain readable |
 | `history.json` | Last 100 cross-workspace moves |
 | trash / task / recovery files | Recycle bin manifest, task center, recovery ledger |
 
