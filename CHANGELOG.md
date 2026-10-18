@@ -8,6 +8,11 @@
 - **`mover_rename_workspace` agent tool** (`mover.ws.rename`, with `dryRun`): renames a workspace's display title after user confirmation through the approval seam. The prompt is skipped when the calling session's sandbox mode is `danger-full-access` (full access). Unknown ids, blank names, and names held by another workspace fail before any prompt. Renaming to the current title is a no-op. As with the existing mutating tools, hosts without an approval seam proceed without a prompt.
 - `mover_doctor` check `host-sandbox-policy` reports whether full-access detection is available.
 
+### Fixed
+
+- **The plugin no longer switches off entirely on hosts without `dsh-user-approval` or `dsh-tools`.** Both were listed as injected services, and DSH's plugin framework treats every injected service as required. So a host missing either one left the whole plugin inactive: no agent tools, and the rescue panel's RPC returned 404. That also meant the documented "no approval seam → proceed" behavior could never run. Only the workspace registry and session persistence are required now. The agent tools register while `dsh-tools` is present and unregister when it goes, and the approval service is looked up on each call.
+- **Approval requests now carry the tool call's id.** The ACP answerer ignores requests without one, so on ACP hosts `mover_move_session`, `mover_repair_sessions`, and `mover_rename_workspace` could never be approved (the outcome was always `unavailable`). The Web prompt also uses the id to attach to the tool call it already displays.
+
 ## [2.3.0] - 2026-10-13
 
 ### Added

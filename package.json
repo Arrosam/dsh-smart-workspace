@@ -22,7 +22,7 @@
     "docs/media",
     "LICENSE"
   ],  "scripts": {
-    "test": "node --test test/core.test.mjs test/e2e-sandbox.test.mjs test/policy.test.mjs test/client-dom.test.mjs test/traffic-badge.test.mjs test/release-downloads.test.mjs test/workspace-tools.test.mjs",
+    "test": "node --test test/core.test.mjs test/e2e-sandbox.test.mjs test/policy.test.mjs test/client-dom.test.mjs test/traffic-badge.test.mjs test/release-downloads.test.mjs test/workspace-tools.test.mjs test/host-services.test.mjs",
     "check:syntax": "node --check lib/index.js && node --check client/client.js",
     "check:pack": "npm pack --dry-run",
     "check": "npm run check:syntax && npm test && npm run check:pack"
