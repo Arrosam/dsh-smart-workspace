@@ -65,7 +65,7 @@ DeepSeek Harness's sidebar supports drag-to-reorder **within** a workspace, but 
 - **⏳ Busy-session queue**: running sessions are never touched; queued work is persistent, with per-item cancel/retry and batch retry for failed items
 - **🔎 Migration preview**: before confirmation, show source, target path, collisions, running state, adapter mode, and estimated new backup bytes; reuse is called out when a matching snapshot already exists
 - **📂 Empty-group cleanup / open folder**: only truly empty workspaces are listed; open a group directory in your file manager
-- **🤖 Agent tools**: four model-callable tools — `mover_list_sessions` / `mover_move_session` / `mover_repair_sessions` / `mover_doctor` — so "move this session to group X" in the conversation runs the same backup-first pipeline as the panel; mutating tools ask for user approval first, and hosts without `dsh-tools` skip them automatically
+- **🤖 Agent tools**: six model-callable tools — `mover_list_sessions` / `mover_move_session` / `mover_repair_sessions` / `mover_doctor` / `mover_create_workspace` / `mover_rename_workspace` — so "move this session to group X" in the conversation runs the same backup-first pipeline as the panel, and workspaces can be created and renamed too; move, repair and rename ask for user approval first (rename skips it under full access), and hosts without `dsh-tools` skip them automatically
 
 ## 🚀 Install
 
@@ -177,10 +177,12 @@ Mid-turn sessions are rejected; failed moves roll back automatically.
 
 ### Conversational moves (agent tools)
 
-1. Hosts with `dsh-tools` (web and desktop by default) register four model tools: listing and doctor (both read-only), move, and one-click repair;
-2. Say "list my sessions", "move session X to group Y", "run a repair", or "run a self-check" — the model resolves names into exact ids with the listing tool first, then acts;
+1. Hosts with `dsh-tools` (web and desktop by default) register six model tools: listing and doctor (both read-only), move, one-click repair, create workspace, and rename workspace;
+2. Say "list my sessions", "move session X to group Y", "run a repair", "run a self-check", "create a workspace called Z for folder /path", or "rename group Y to Z" — the model resolves names into exact ids with the listing tool first, then acts;
 3. Mutating tools raise a host approval prompt before acting (same level as the panel confirm); dismissing or denying means nothing happens; the two read-only tools never prompt;
-4. Hosts without `dsh-tools` skip the tools automatically — the panel and drag flows are unaffected.
+4. **Create workspace** registers an existing folder under a new name. It is refused if another workspace already uses that folder (including a symlink to it) or that name, and it never creates folders on disk. It does not ask for approval;
+5. **Rename workspace** changes only the display name and asks for approval first. Sessions with **full access** (`danger-full-access`) rename without asking. A name another workspace already uses is refused;
+6. Hosts without `dsh-tools` skip the tools automatically — the panel and drag flows are unaffected.
 
 ### Bulk move
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`mover_create_workspace` agent tool** (`mover.ws.create`): registers an existing folder as a new workspace with a given name. The tool rejects the call with `conflict` when the folder is already used by a workspace (same-folder identity is the host registry's realpath canon, so a trailing slash, `..`, or a symlink alias counts as the same folder) or when the name is already taken. Relative paths and files are rejected with `invalid-input`, and missing folders with `not-found`. Nothing is created on disk, and no approval is asked.
+- **`mover_rename_workspace` agent tool** (`mover.ws.rename`, with `dryRun`): renames a workspace's display title after user confirmation through the approval seam. The prompt is skipped when the calling session's sandbox mode is `danger-full-access` (full access). Unknown ids, blank names, and names held by another workspace fail before any prompt. Renaming to the current title is a no-op. As with the existing mutating tools, hosts without an approval seam proceed without a prompt.
+- `mover_doctor` check `host-sandbox-policy` reports whether full-access detection is available.
+
 ## [2.3.0] - 2026-10-13
 
 ### Added
