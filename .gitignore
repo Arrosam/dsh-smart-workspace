@@ -2,6 +2,9 @@ node_modules/
 *.log
 .DS_Store
 
+# dsh-smart-prompt 在本仓库工作目录生成的「项目知识」文件（由外部插件维护，不属于本插件源码）。
+SMART-PROMPT.md
+
 # git worktrees / 临时检出：内含整个仓库的副本，绝不能被主仓库提交。
 # 注意：git worktree 注册过的目录会有 .git 文件、且不受 .gitignore 影响，
 # 因此这里只覆盖"遗留的普通目录"这种最常见情况。

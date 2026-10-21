@@ -16,7 +16,7 @@
 // title uniqueness is entirely the plugin's rule.
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, lstatSync, rmSync, realpathSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, lstatSync, rmSync, realpathSync, symlinkSync, statSync, chmodSync } from 'node:fs';
 import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -41,7 +41,7 @@ const MODE = Object.freeze({ FULL: 'danger-full-access', WRITE: 'workspace-write
 const SANDBOX = Object.freeze({ ABSENT: 'absent', NO_RESOLVE: 'no-resolve', THROWS: 'throws', EMPTY_RESULT: 'empty-result', DEFAULT_FULL: 'default-full' });
 const OUTCOME = Object.freeze({ ALLOWED: 'allowed-once', REJECTED: 'rejected', CANCELLED: 'cancelled', UNAVAILABLE: 'unavailable' });
 /** Non-outcome approval seam shapes (a plain OUTCOME string means "request resolves to that outcome"). */
-const APPROVAL = Object.freeze({ ABSENT: 'absent', NO_REQUEST: 'no-request', THROWS: 'throws' });
+const APPROVAL = Object.freeze({ ABSENT: 'absent', NO_REQUEST: 'no-request', THROWS: 'throws', HANG: 'hang' });
 const DOCTOR_CHECK_ID = 'host-sandbox-policy';
 const CHECK_STATE = Object.freeze({ PASS: 'pass', WARN: 'warn' });
 const WS = Object.freeze({ A: { id: 'wid-a', title: 'Alpha' }, B: { id: 'wid-b', title: 'Beta' } });
@@ -108,6 +108,12 @@ function makeRegistry(spies) {
     invalidSessionPaths: new Map(),
     list() { return [...order]; },
     get(id) { return order.find((entity) => entity.id === id); },
+    async delete(id) {
+      const index = order.findIndex((entity) => entity.id === id);
+      if (index < 0) return false;
+      order.splice(index, 1);
+      return true;
+    },
     async create(path, title) {
       spies.create.push({ path, title });
       if (typeof path !== 'string' || !isAbsolute(path)) throw new TypeError(`Workspace path is not fully qualified: '${path}'`);
@@ -146,6 +152,11 @@ function makeSandboxPolicy(kind, calls) {
 function makeApproval(kind, calls, probe) {
   if (kind === APPROVAL.ABSENT) return undefined;
   if (kind === APPROVAL.NO_REQUEST) return {};
+  if (kind === APPROVAL.HANG) {
+    // 模拟「审批接缝自己的 promise 永不 settle」：DSH 的工具超时只 abort exec.signal，
+    // 若不与 signal 竞速，工具体就会永远 pending 并卡住整条排他工具通道。
+    return { calls, request(req) { calls.push({ req, ...probe() }); return new Promise(() => {}); } };
+  }
   return {
     async request(req) {
       calls.push({ req, ...probe() });
@@ -207,7 +218,7 @@ function snapshotTree(dir) {
  * <root>/links (symlinks), <root>/home (DSH_HOME), <root>/store (session persistence).
  * Workspace A owns one real session archive so "sessions untouched" is observable.
  */
-function mountHost({ sandbox = MODE.WRITE, approval = OUTCOME.ALLOWED, tools = true, agents } = {}) {
+function mountHost({ sandbox = MODE.WRITE, approval = OUTCOME.ALLOWED, tools = true, agents, services = {} } = {}) {
   // Native realpath, matching the registry's fs.promises.realpath: the JS realpathSync keeps Windows 8.3
   // short names (C:\Users\RUNNER~1\...) and caller letter case, so every expected path would then differ
   // from the stored canonical one. Children joined below are created with exact case, so they stay canonical.
@@ -224,9 +235,10 @@ function mountHost({ sandbox = MODE.WRITE, approval = OUTCOME.ALLOWED, tools = t
     file: join(fx, 'plain.txt'),
     links: join(root, 'links'),
     home: join(root, 'home'),
-    store: join(root, 'store')
+    store: join(root, 'store'),
+    docs: join(root, 'docs')
   };
-  for (const dir of [paths.A, paths.B, paths.sub, paths.free, paths.free2, paths.links, paths.home, paths.store]) mkdirSync(dir, { recursive: true });
+  for (const dir of [paths.A, paths.B, paths.sub, paths.free, paths.free2, paths.links, paths.home, paths.store, paths.docs]) mkdirSync(dir, { recursive: true });
   writeFileSync(join(paths.A, 'notes.txt'), 'alpha notes');
   writeFileSync(paths.file, 'plain file');
   const previousHome = process.env.DSH_HOME;
@@ -253,7 +265,7 @@ function mountHost({ sandbox = MODE.WRITE, approval = OUTCOME.ALLOWED, tools = t
     workspaceRegistry: registry,
     sessionPersistence: makePersistence(paths.store),
     logger: { info() {}, warn() {}, error() {}, debug() {} },
-    get: (key) => (key === 'sandboxPolicy' ? sandboxPolicy : key === 'agents' ? agents : undefined),
+    get: (key) => (key === 'sandboxPolicy' ? sandboxPolicy : key === 'agents' ? agents : services[key]),
     effect(register) {
       const cleanup = register();
       if (typeof cleanup === 'function') cleanups.push(cleanup);
@@ -277,6 +289,8 @@ function mountHost({ sandbox = MODE.WRITE, approval = OUTCOME.ALLOWED, tools = t
     entityA,
     entityB,
     registered,
+    agents,
+    services,
     sessionArtifact,
     sessionBytes: readFileSync(sessionArtifact),
     tool(name) {
@@ -1124,3 +1138,205 @@ test('system: without dsh-tools the RPC endpoints still create and rename', asyn
   assert.equal(host.registry.get(created.workspaceId).path, host.paths.free);
 });
 //#endregion
+
+//#region no-workspace mode (v2.5)
+// Contract under test:
+//   - the sidebar entry needs a host that can prepare a read-only temp folder: mover.nows.prepare;
+//   - mover_begin_workspace resolves the destination from repository identity (reverse lookup through
+//     the same workspace/session relations mover_list_sessions exposes) and falls back to a directory
+//     for a brand-new workspace;
+//   - when the calling session is running, the move is queued with willResume and the session is
+//     resumed automatically (a user-turned message) after the queue drains;
+//   - the temp content travels with the session and the temp folder is removed;
+//   - a session already in a persistent workspace reports alreadyInTarget instead of an error.
+const NOWS = Object.freeze({
+  BEGIN: 'mover_begin_workspace',
+  PREPARE: 'mover.nows.prepare',
+  BEGIN_RPC: 'mover.beginWorkspace'
+});
+const GIT_CONFIG = '[remote "origin"]\n\turl = https://github.com/Arrosam/dsh-smart-workspace.git\n';
+
+/** Write a session archive under the store for the given cwd, with a real zstd header. */
+function writeSessionAt(host, sessionId, cwd, title = 'No-workspace session') {
+  const artifact = artifactPath(host.paths.store, cwd, sessionId);
+  mkdirSync(dirname(artifact), { recursive: true });
+  writeFileSync(artifact, makeArtifact({ type: 'session', id: sessionId, cwd, title }));
+  return artifact;
+}
+
+/** A fake sessionController: records the resume prompts the plugin delivers after a queued move. */
+function makeSessionController() {
+  const prompts = [];
+  return {
+    prompts,
+    async prompt(request) {
+      prompts.push(request);
+      return { accepted: true };
+    }
+  };
+}
+
+function nowsServices(host, sessionController) {
+  return {
+    workspaceController: { config: { documentsDirectory: host.paths.docs } },
+    sessionController
+  };
+}
+
+test('no-workspace: prepare creates a read-only temp folder under the DSH default workspace', async () => {
+  const host = mountHost();
+  host.ctx.get = (key) => (key === 'workspaceController' ? { config: { documentsDirectory: host.paths.docs } } : undefined);
+  const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE, { title: '无工作区' }));
+  assert.equal(prepared.readOnly, true);
+  assert.ok(prepared.cwd.startsWith(join(host.paths.docs, 'deepseek-harness', 'default-workspace', '.workspace-mover-tmp')), prepared.cwd);
+  assert.equal(statSync(prepared.cwd).isDirectory(), true);
+  assert.equal(statSync(prepared.cwd).mode & 0o200, 0, 'owner write bit must be clear (read-only on disk)');
+  // DSH requires a workspace for a blank session's composer, so the host registers a temporary
+  // internal workspace over the folder (removed automatically once the session migrates).
+  assert.equal(typeof prepared.workspaceId, 'string');
+  assert.equal(prepared.workspaceTitle, '无工作区');
+  assert.equal(host.registry.get(prepared.workspaceId).path, prepared.cwd);
+  assert.equal(host.registry.get(prepared.workspaceId).title, '无工作区');
+  // a second prepare yields a distinct folder; the DSH default workspace itself stays untouched
+  const second = expectRpcOk(await host.rpc(NOWS.PREPARE, { title: '无工作区' }));
+  assert.notEqual(second.cwd, prepared.cwd);
+  assert.notEqual(second.workspaceId, prepared.workspaceId);
+  assert.equal(readdirSync(join(host.paths.docs, 'deepseek-harness', 'default-workspace')).length, 1, 'only the hidden temp container lives there');
+});
+
+test('no-workspace: begin joins an existing workspace by repository identity, moves content, deletes the temp folder', async () => {
+  const sessionController = makeSessionController();
+  const host = mountHost({ agents: makeAgents([]), services: {} });
+  Object.assign(host.services, nowsServices(host, sessionController));
+  // workspace A becomes "the workspace already handling github.com/Arrosam/dsh-smart-workspace"
+  mkdirSync(join(host.paths.A, '.git'), { recursive: true });
+  writeFileSync(join(host.paths.A, '.git', 'config'), GIT_CONFIG);
+
+  const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE, {}));
+  const tempCwd = prepared.cwd;
+  const callerId = 'session-nows';
+  writeSessionAt(host, callerId, tempCwd);
+  // contents that already existed in the temp folder + a name collision in the target
+  chmodSync(tempCwd, 0o700);
+  writeFileSync(join(tempCwd, 'notes.txt'), 'from temp');
+  mkdirSync(join(tempCwd, 'sub'));
+  writeFileSync(join(tempCwd, 'sub', 'nested.txt'), 'nested');
+  chmodSync(tempCwd, 0o500);
+  writeFileSync(join(host.paths.A, 'notes.txt'), 'existing');
+
+  // the list tool exposes the reverse-lookup data the model uses
+  const listed = await host.runTool(TOOL.LIST, {});
+  assert.equal(listed.sessions.find((row) => row.sessionId === callerId)?.noWorkspace, true);
+  assert.equal(listed.workspaces.find((row) => row.workspaceId === WS.A.id)?.repo?.identity, 'github.com/arrosam/dsh-smart-workspace');
+  assert.equal(listed.workspaces.find((row) => row.workspaceId === prepared.workspaceId)?.ephemeral, true, 'the temporary workspace is flagged');
+
+  // not running -> the RPC moves immediately
+  const moved = expectRpcOk(await host.rpc(NOWS.BEGIN_RPC, { sessionId: callerId, repository: 'Arrosam/dsh-smart-workspace' }));
+  assert.equal(moved.moved, true);
+  assert.equal(moved.to.cwd, host.paths.A);
+  assert.equal(existsSync(tempCwd), false, 'temp folder deleted after the move');
+  assert.equal(readFileSync(join(host.paths.A, 'notes.txt'), 'utf8'), 'existing', 'existing target file is never overwritten');
+  const renamed = moved.workspaceFiles.renamed.find((item) => item.name === 'notes.txt');
+  assert.ok(renamed, 'colliding name was renamed');
+  assert.equal(readFileSync(join(host.paths.A, renamed.to), 'utf8'), 'from temp');
+  const renamedSub = moved.workspaceFiles.renamed.find((item) => item.name === 'sub');
+  assert.ok(renamedSub, 'colliding sub folder was renamed instead of merged');
+  assert.equal(readFileSync(join(host.paths.A, renamedSub.to, 'nested.txt'), 'utf8'), 'nested');
+  assert.equal(readHeader(readFileSync(findArtifact(host, callerId))).cwd, host.paths.A);
+  assert.ok(host.entityA.sessionIds.includes(callerId));
+  assert.equal(host.registry.get(prepared.workspaceId), undefined, 'the temporary no-workspace workspace registration is removed');
+  const history = expectRpcOk(await host.rpc('mover.history', {}));
+  assert.equal(history.items[0].sessionId, callerId);
+  assert.equal(history.items[0].sourceWorkspaceId, null, 'the removed temporary workspace is not recorded as an undo target');
+
+  // a "new workspace" directory inside the temporary container is rejected (it would be swept/deleted)
+  const preparedAgain = expectRpcOk(await host.rpc(NOWS.PREPARE, { title: 'No workspace' }));
+  writeSessionAt(host, 'session-inside', preparedAgain.cwd);
+  const badTarget = await host.rpc(NOWS.BEGIN_RPC, { sessionId: 'session-inside', directory: join(preparedAgain.cwd, 'nested-workspace') });
+  assert.equal(badTarget.ok, false, 'workspace directory inside the temp container must be rejected');
+  assert.equal(badTarget.error.code, 'invalid-input');
+
+  // idempotent retry: already in a persistent workspace now
+  const again = expectRpcOk(await host.rpc(NOWS.BEGIN_RPC, { sessionId: callerId, repository: 'Arrosam/dsh-smart-workspace' }));
+  assert.equal(again.alreadyInTarget, true);
+  assert.equal(again.workspaceFiles, null);
+  assert.equal(sessionController.prompts.length, 0, 'no resume needed for an immediate move');
+
+  // a normal (already-persistent) session must not cause target creation: validation runs first
+  const strayDir = join(host.paths.root, 'must-not-exist');
+  const wrong = await host.rpc(NOWS.BEGIN_RPC, { sessionId: callerId, directory: strayDir });
+  assert.equal(wrong.ok, true, JSON.stringify(wrong));
+  assert.equal(wrong.value.alreadyInTarget, true, 'a session already in a persistent workspace reports alreadyInTarget');
+  assert.equal(existsSync(strayDir), false, 'no target folder is created for a session that is not in no-workspace mode');
+  assert.equal(host.registry.list().some((entity) => entity.path === strayDir), false);
+});
+
+test('no-workspace: begin queues while the session runs, drains after idle, and resumes the session automatically', async () => {
+  const agents = makeAgents([CALLER_SESSION.id]);
+  const sessionController = makeSessionController();
+  const host = mountHost({ agents });
+  Object.assign(host.services, nowsServices(host, sessionController));
+
+  const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE, { title: 'No workspace' }));
+  const tempCwd = prepared.cwd;
+  writeSessionAt(host, CALLER_SESSION.id, tempCwd);
+
+  const result = await host.runTool(NOWS.BEGIN, { directory: join(host.paths.root, 'new-project') }, makeExec({ session: { id: CALLER_SESSION.id } }));
+  assert.equal(result.queued, true, JSON.stringify(result));
+  assert.equal(result.willResume, true);
+  assert.equal(typeof result.queueTaskId, 'string');
+  assert.equal(existsSync(tempCwd), true, 'nothing is touched while the session is running');
+
+  // The queue record survives for the model/panel and reports the resume intent.
+  const queuedList = await host.rpc('mover.migrations.list', { drain: false });
+  const queuedTask = queuedList.value.items.find((item) => item.id === result.queueTaskId);
+  assert.equal(queuedTask.state, 'waiting-for-idle');
+  assert.equal(queuedTask.willResume, true);
+
+  // Turn ends: the watcher detects idle, drains immediately and resumes the session in the new cwd.
+  agents.setRunning([]);
+  for (let i = 0; i < 40 && sessionController.prompts.length === 0; i += 1) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+
+  const task = (await host.rpc('mover.migrations.list', { drain: false })).value.items.find((item) => item.id === result.queueTaskId);
+  assert.equal(task.state, 'done', JSON.stringify(task));
+  assert.equal(existsSync(tempCwd), false, 'temp folder removed by the queued move');
+  assert.equal(host.registry.list().some((entity) => entity.path === tempCwd), false, 'the temporary workspace registration is gone');
+  assert.ok(existsSync(join(host.paths.root, 'new-project')), 'new workspace folder created');
+  const created = host.registry.list().find((entity) => entity.path === join(host.paths.root, 'new-project'));
+  assert.ok(created, 'new folder registered as a workspace');
+  assert.equal(readHeader(readFileSync(findArtifact(host, CALLER_SESSION.id))).cwd, created.path);
+  assert.equal(sessionController.prompts.length, 1, 'session resumed exactly once');
+  const resume = sessionController.prompts[0];
+  assert.equal(resume.sessionId, CALLER_SESSION.id);
+  assert.equal(resume.mode, 'queue');
+  assert.match(resume.content[0].text, /completed/);
+  assert.match(resume.content[0].text, new RegExp(created.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+function findArtifact(host, sessionId) {
+  const storeRoot = host.paths.store;
+  for (const project of readdirSync(storeRoot)) {
+    const dir = join(storeRoot, project, sessionId);
+    if (!existsSync(dir)) continue;
+    const name = readdirSync(dir).filter((entry) => ARTIFACT_NAME.test(entry)).sort().at(-1);
+    if (name) return join(dir, name);
+  }
+  throw new Error(`artifact for ${sessionId} not found`);
+}
+//#endregion
+
+test('system: a tool whose approval seam never settles still fails on exec.signal abort (no wedged tool channel)', async () => {
+  const host = mountHost({ approval: APPROVAL.HANG });
+  const controller = new AbortController();
+  const exec = { agent: { id: 'agent-caller', session: CALLER_SESSION }, signal: controller.signal, callId: 'call-abort' };
+  const pending = host.runTool(TOOL.RENAME, { workspaceId: WS.A.id, name: 'Never' }, exec);
+  setTimeout(() => controller.abort(new Error('tool call timed out')), 20);
+  const started = Date.now();
+  let caught = null;
+  await assert.rejects(pending, (err) => { caught = err; return true; });
+  assert.ok(Date.now() - started < 2000, 'the tool body settles promptly after the abort');
+  assert.match(String(caught?.message ?? caught), /cancelled/i);
+  assert.equal(host.registry.get(WS.A.id).title, WS.A.title, 'nothing was renamed');
+});

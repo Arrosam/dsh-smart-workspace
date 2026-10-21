@@ -10,14 +10,15 @@
 //      the callback runs again with a fresh child when the service comes back.
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, realpathSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, basename } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { join, basename, sep } from 'node:path';
 import * as plugin from '../lib/index.js';
 
 const CHANNEL = '/workspace-mover';
 const REQUIRED = ['workspaceRegistry', 'sessionPersistence'];
-const AGENT_TOOLS = ['mover_list_sessions', 'mover_move_session', 'mover_repair_sessions', 'mover_doctor', 'mover_create_workspace', 'mover_rename_workspace'];
+const AGENT_TOOLS = ['mover_list_sessions', 'mover_move_session', 'mover_begin_workspace', 'mover_repair_sessions', 'mover_doctor', 'mover_create_workspace', 'mover_rename_workspace'];
 const TOOL = Object.freeze({ RENAME: 'mover_rename_workspace', MOVE: 'mover_move_session' });
 const RM_TREE = { recursive: true, force: true, maxRetries: 3 };
 
@@ -41,9 +42,24 @@ function makeCordisHost(initial) {
 	const services = new Map(Object.entries(initial));
 	const watchers = []; // { names, callback, fiber? }
 	const rootFiber = makeFiber();
+	const eventListeners = new Map(); // event name -> [listener]
 
 	const childCtx = (names, fiber) => {
-		const ctx = { effect: fiber.effect, get: (key) => services.get(key) };
+		const ctx = {
+			effect: fiber.effect,
+			get: (key) => services.get(key),
+			// cordis ctx.on: register on the event bus; the disposer is the calling fiber's effect.
+			on(event, fn) {
+				const list = eventListeners.get(event) ?? [];
+				list.push(fn);
+				eventListeners.set(event, list);
+				fiber.effect(() => () => {
+					const current = eventListeners.get(event) ?? [];
+					const index = current.indexOf(fn);
+					if (index >= 0) current.splice(index, 1);
+				});
+			}
+		};
 		for (const key of names) {
 			const value = services.get(key);
 			// A registration made through a child context is that child's effect (dsh-tools
@@ -81,6 +97,7 @@ function makeCordisHost(initial) {
 		ctx,
 		provide(name, value) { services.set(name, value); refresh(); },
 		remove(name) { services.delete(name); refresh(); },
+		listeners(event) { return [...(eventListeners.get(event) ?? [])]; },
 		dispose() { for (const w of watchers) w.fiber?.dispose(); rootFiber.dispose(); }
 	};
 }
@@ -124,14 +141,29 @@ function makeApproval(outcome) {
  */
 function mountCordis() {
 	const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'wsm-hostsvc-')));
-	const dirs = { home: join(root, 'home'), store: join(root, 'store'), a: join(root, 'alpha'), b: join(root, 'beta') };
+	const dirs = { home: join(root, 'home'), store: join(root, 'store'), a: join(root, 'alpha'), b: join(root, 'beta'), docs: join(root, 'docs') };
 	for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
 	const previousHome = process.env.DSH_HOME;
 	process.env.DSH_HOME = dirs.home;
 
 	const titles = [];
 	const entities = [makeEntity('wid-a', dirs.a, basename(dirs.a), titles), makeEntity('wid-b', dirs.b, basename(dirs.b), titles)];
-	const registry = { list: () => [...entities], get: (id) => entities.find((e) => e.id === id), archivedSessionIds: [] };
+	const registry = {
+		list: () => [...entities],
+		get: (id) => entities.find((e) => e.id === id),
+		archivedSessionIds: [],
+		async create(path, title) {
+			const entity = makeEntity(randomUUID(), path, title ?? basename(path), titles);
+			entities.unshift(entity);
+			return entity;
+		},
+		async delete(id) {
+			const index = entities.findIndex((entity) => entity.id === id);
+			if (index < 0) return false;
+			entities.splice(index, 1);
+			return true;
+		}
+	};
 	let dispatch;
 	const host = makeCordisHost({
 		workspaceRegistry: registry,
@@ -149,6 +181,7 @@ function mountCordis() {
 		satisfied,
 		registry,
 		titles,
+		docs: dirs.docs,
 		rpc: (endpoint, payload) => { assert.equal(typeof dispatch, 'function', 'RPC channel not mounted'); return dispatch(endpoint, payload ?? {}); },
 		async doctorState(id) { return (await handle.rpc('mover.doctor')).value.checks.find((c) => c.id === id)?.state; },
 		async agentTools() { return (await handle.rpc('mover.status')).value.agentTools; },
@@ -194,7 +227,7 @@ test('agent tools register with dsh-tools, unregister when it goes, and re-regis
 	assert.equal(await host.agentTools(), false, 'S0: no tools service');
 
 	host.provide('tools', tools);
-	assert.deepEqual([...tools.registered.keys()].sort(), [...AGENT_TOOLS].sort(), 'S1: all six registered');
+	assert.deepEqual([...tools.registered.keys()].sort(), [...AGENT_TOOLS].sort(), 'S1: all seven registered');
 	assert.equal(await host.agentTools(), true);
 	assert.equal(await host.doctorState('agent-tools'), 'pass');
 
@@ -362,5 +395,74 @@ test('a host without inject still gets tools from ctx.tools and approval from ct
 		if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome;
 		rmSync(root, RM_TREE);
 	}
+});
+//#endregion
+
+//#region 8. no-workspace mode (v2.5)
+test('no-workspace: prepare creates a read-only temp folder and doctor/status report the mode', async () => {
+	const host = mountCordis();
+	host.provide('workspaceController', { config: { documentsDirectory: host.docs } });
+	const res = await host.rpc('mover.nows.prepare', { title: '无工作区' });
+	assert.equal(res.ok, true, JSON.stringify(res.error));
+	const { cwd, defaultWorkspaceRoot, tempRoot, readOnly, workspaceId, workspaceTitle } = res.value;
+	assert.equal(readOnly, true);
+	assert.equal(workspaceTitle, '无工作区');
+	assert.equal(workspaceId, host.registry.list().find((entity) => entity.path === cwd)?.id, 'a temporary workspace is registered over the folder');
+	assert.equal(host.registry.get(workspaceId).title, '无工作区');
+	assert.equal(defaultWorkspaceRoot, realpathSync(join(host.docs, 'deepseek-harness', 'default-workspace')));
+	assert.equal(tempRoot, join(defaultWorkspaceRoot, '.workspace-mover-tmp'));
+	assert.ok(cwd.startsWith(tempRoot + sep));
+	const stats = statSync(cwd);
+	assert.equal(stats.isDirectory(), true);
+	assert.equal(stats.mode & 0o200, 0, 'temp folder must be read-only on disk');
+
+	const status = await host.rpc('mover.status');
+	assert.equal(status.value.capabilities.noWorkspace, true);
+	assert.equal(status.value.capabilities.noWorkspaceRoot, defaultWorkspaceRoot);
+
+	const doctor = await host.rpc('mover.doctor');
+	const check = doctor.value.checks.find((item) => item.id === 'no-workspace');
+	assert.ok(check, 'doctor reports a no-workspace check');
+	assert.equal(check.state, 'pass', check.detail);
+	assert.match(check.detail, /read-only/);
+});
+
+test('no-workspace: systemPrompt notice and write guard steer the model to mover_begin_workspace', async () => {
+	const host = mountCordis();
+	host.provide('workspaceController', { config: { documentsDirectory: host.docs } });
+	const contexts = new Map();
+	host.provide('systemPrompt', {
+		context(spec) { contexts.set(spec.name, spec); return () => contexts.delete(spec.name); }
+	});
+	host.provide('tools', makeTools());
+	await host.rpc('mover.nows.prepare');
+
+	const promptSpec = contexts.get('workspace-mover:no-workspace');
+	assert.ok(promptSpec, 'no-workspace prompt registered with the prompt registry');
+	const tempCwd = readdirSync(join(host.docs, 'deepseek-harness', 'default-workspace', '.workspace-mover-tmp'))
+		.map((name) => join(host.docs, 'deepseek-harness', 'default-workspace', '.workspace-mover-tmp', name))[0];
+	const text = promptSpec.text({ agent: { session: { id: 's-nows', header: { cwd: tempCwd } } } });
+	assert.match(text, /NO-WORKSPACE mode/);
+	assert.match(text, /mover_begin_workspace/);
+	assert.match(text, /read-only/);
+	assert.equal(promptSpec.text({ agent: { session: { id: 's-normal', header: { cwd: host.docs } } } }), '', 'a normal session gets no notice');
+	assert.equal(promptSpec.text({}), '');
+
+	const listeners = host.listeners('tools/pre-execute');
+	assert.equal(listeners.length, 1, 'the write guard subscribed once');
+	const execFor = (toolName, cwd) => ({ name: toolName, agent: { session: { header: { cwd } } } });
+	let nextCalls = 0;
+	const next = () => { nextCalls += 1; return Promise.resolve({ kind: 'allow' }); };
+	for (const toolName of ['write', 'edit', 'str_replace_editor', 'bash', 'terminal_send']) {
+		const decision = await listeners[0](execFor(toolName, tempCwd), next);
+		assert.equal(decision.kind, 'deny', `${toolName} must be denied in no-workspace mode`);
+		assert.match(decision.reason, /mover_begin_workspace/);
+	}
+	assert.equal(nextCalls, 0, 'denied calls never reach the next gate');
+	const read = await listeners[0](execFor('read', tempCwd), next);
+	assert.equal(read.kind, 'allow');
+	const outside = await listeners[0](execFor('write', host.docs), next);
+	assert.equal(outside.kind, 'allow');
+	assert.equal(nextCalls, 2);
 });
 //#endregion

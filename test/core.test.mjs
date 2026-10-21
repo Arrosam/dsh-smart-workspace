@@ -6,7 +6,7 @@ import { zstdCompressSync, constants } from 'node:zlib';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { scanFrames, readHeader, rewriteHeaderCwd, generationLogFilename, parseGenerationLogFilename, findHighestArtifact, artifactPath, sessionDir } from '../lib/index.js';
+import { scanFrames, readHeader, rewriteHeaderCwd, generationLogFilename, parseGenerationLogFilename, findHighestArtifact, artifactPath, sessionDir, normalizeRepoIdentity, readRepoInfo, workspaceMatchesRepository, NO_WORKSPACE_TEMP_DIR } from '../lib/index.js';
 
 const OPTS = { params: { [constants.ZSTD_c_checksumFlag]: 1 } };
 
@@ -122,3 +122,60 @@ test('mixed session compression encodings are rejected explicitly', () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+//#region 无工作区模式：仓库身份归一与反查（v2.5）
+test('normalizeRepoIdentity 把各种 git 远程写法压成 host/owner/repo', () => {
+	const cases = [
+		['https://github.com/Arrosam/dsh-smart-workspace.git', 'github.com/arrosam/dsh-smart-workspace'],
+		['https://github.com/Arrosam/dsh-smart-workspace', 'github.com/arrosam/dsh-smart-workspace'],
+		['git@github.com:Arrosam/dsh-smart-workspace.git', 'github.com/arrosam/dsh-smart-workspace'],
+		['ssh://git@github.com/Arrosam/dsh-smart-workspace.git', 'github.com/arrosam/dsh-smart-workspace'],
+		['git+https://github.com/Arrosam/dsh-smart-workspace.git', 'github.com/arrosam/dsh-smart-workspace'],
+		['Arrosam/dsh-smart-workspace', 'arrosam/dsh-smart-workspace'],
+		['  dsh-smart-workspace  ', 'dsh-smart-workspace'],
+		['', '']
+	];
+	for (const [input, expected] of cases) assert.equal(normalizeRepoIdentity(input), expected, input);
+});
+
+test('readRepoInfo 读取普通仓库与 worktree 的 origin，workspaceMatchesRepository 支持三种写法', () => {
+	const root = mkdtempSync(join(tmpdir(), 'wsm-repoinfo-'));
+	try {
+		const plain = join(root, 'plain');
+		mkdirSync(join(plain, '.git'), { recursive: true });
+		writeFileSync(join(plain, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = https://github.com/Arrosam/dsh-smart-workspace.git\n');
+		assert.deepEqual(readRepoInfo(plain), {
+			root: plain,
+			name: 'plain',
+			remoteUrl: 'https://github.com/Arrosam/dsh-smart-workspace.git',
+			identity: 'github.com/arrosam/dsh-smart-workspace'
+		});
+		assert.equal(workspaceMatchesRepository(plain, 'https://github.com/Arrosam/dsh-smart-workspace'), true);
+		assert.equal(workspaceMatchesRepository(plain, 'Arrosam/dsh-smart-workspace'), true);
+		assert.equal(workspaceMatchesRepository(plain, 'dsh-smart-workspace'), true, 'folder/tail name also matches');
+		assert.equal(workspaceMatchesRepository(plain, 'github.com/other/repo'), false);
+
+		// worktree 的 .git 是文件，config 在 gitdir 指向的目录里
+		const worktree = join(root, 'worktree');
+		const gitdir = join(root, 'gitdirs', 'worktree');
+		mkdirSync(worktree, { recursive: true });
+		mkdirSync(gitdir, { recursive: true });
+		writeFileSync(join(worktree, '.git'), `gitdir: ${gitdir}\n`);
+		writeFileSync(join(gitdir, 'config'), '[remote "origin"]\n\turl = git@github.com:Arrosam/other-repo.git\n');
+		assert.equal(readRepoInfo(worktree)?.identity, 'github.com/arrosam/other-repo');
+		assert.equal(workspaceMatchesRepository(worktree, 'other-repo'), true);
+
+		// 非 git 目录返回 null，不影响其它消费者
+		const plainDir = join(root, 'not-a-repo');
+		mkdirSync(plainDir, { recursive: true });
+		assert.equal(readRepoInfo(plainDir), null);
+		assert.equal(workspaceMatchesRepository(plainDir, 'whatever'), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test('无工作区临时目录常量稳定（前端/文档约定的路径片段）', () => {
+	assert.equal(NO_WORKSPACE_TEMP_DIR, '.workspace-mover-tmp');
+});
+//#endregion

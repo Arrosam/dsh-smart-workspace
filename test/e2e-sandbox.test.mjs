@@ -2413,7 +2413,7 @@ const FAKE_EXEC = () => ({ agent: { session: {} }, signal: undefined });
 test('v2.1 apply 在带 dsh-tools 的宿主上注册三个 agent 工具，status 汇报能力位', async () => {
   const { registered } = mountToolStubs();
   apply(ctx);
-  assert.deepEqual(registered.map((t) => t.name), ['mover_list_sessions', 'mover_move_session', 'mover_repair_sessions', 'mover_doctor', 'mover_create_workspace', 'mover_rename_workspace']);
+  assert.deepEqual(registered.map((t) => t.name), ['mover_list_sessions', 'mover_move_session', 'mover_begin_workspace', 'mover_repair_sessions', 'mover_doctor', 'mover_create_workspace', 'mover_rename_workspace']);
   for (const def of registered) {
     assert.equal(typeof def.execute, 'function', `${def.name}.execute`);
     assert.equal(typeof def.output?.render, 'function', `${def.name}.output.render`);

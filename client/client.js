@@ -13,6 +13,7 @@ window.__ModuleLoader__.load({
 		const React = require("react");
 
 		const CHANNEL = "/workspace-mover";
+		const NO_WS_PREPARE_ENDPOINT = "mover.nows.prepare";
 		const STYLE_ID = "dsh-workspace-mover-style";
 
 		const STRINGS = {
@@ -214,7 +215,14 @@ window.__ModuleLoader__.load({
 				dataSummary: "数据保护：回收站 {r} 项（{rSize}）· 备份 {b} 份（{bSize}）",
 				dataCleanupBtn: "清理 30 天前的数据",
 				dataCleanupConfirm: "将清理 {r} 个回收站条目和 {b} 份备份（删除于 30 天前），释放 {size}。继续？",
-				dataCleanedMsg: "✓ 已清理 {r} 个回收站条目、{b} 份备份，释放 {size}"
+				dataCleanedMsg: "✓ 已清理 {r} 个回收站条目、{b} 份备份，释放 {size}",
+				nowsEntry: "无工作区",
+				nowsEntryTitle: "在临时目录开始会话（首次写文件前会自动迁移到持续工作区）",
+				nowsWorkspaceTitle: "无工作区",
+				nowsStarted: "✓ 已创建无工作区会话：{cwd}",
+				nowsUnsupported: "当前宿主不支持创建无工作区会话（缺少会话或导航服务）",
+				nowsCreateFailed: "创建无工作区会话失败：{msg}",
+				newSessionLabel: "新建会话"
 			},
 			en: {
 				confirmTitle: "Move session across workspaces",
@@ -414,7 +422,14 @@ window.__ModuleLoader__.load({
 				dataSummary: "Data protection: recycle bin {r} items ({rSize}) · backups {b} copies ({bSize})",
 				dataCleanupBtn: "Clean data older than 30 days",
 				dataCleanupConfirm: "This will purge {r} recycle entries and {b} backups (older than 30 days), freeing {size}. Continue?",
-				dataCleanedMsg: "✓ Purged {r} recycle entries and {b} backups, freed {size}"
+				dataCleanedMsg: "✓ Purged {r} recycle entries and {b} backups, freed {size}",
+				nowsEntry: "No workspace",
+				nowsEntryTitle: "Start a session in a temporary folder (moves to a persistent workspace before the first file write)",
+				nowsWorkspaceTitle: "No workspace",
+				nowsStarted: "✓ No-workspace session created: {cwd}",
+				nowsUnsupported: "This host cannot create a no-workspace session (session or navigation service missing)",
+				nowsCreateFailed: "Could not create a no-workspace session: {msg}",
+				newSessionLabel: "New session"
 			}
 		};
 		const lang = (navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
@@ -517,6 +532,13 @@ window.__ModuleLoader__.load({
 .wsm-caption{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);margin-bottom:6px}
 .wsm-help{flex:none;display:inline-flex;width:15px;height:15px;border-radius:50%;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.2));align-items:center;justify-content:center;font-size:10px;font-weight:400;color:var(--dsw-alias-label-tertiary,#999);cursor:help;user-select:none}
 .wsm-history{margin-top:16px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}
+/* 无工作区入口（注入到官方「新会话」按钮旁） */
+.wsm-nows-entry{display:flex;align-items:center;gap:6px;width:100%;margin:2px 0 0;padding:6px 10px;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#777);font:inherit;font-size:13px;line-height:18px;cursor:pointer;text-align:left}
+.wsm-nows-entry:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.05));color:var(--dsw-alias-label-primary,#111)}
+.wsm-nows-entry:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary,#4176e6));outline-offset:-2px}
+.wsm-nows-entry[data-rail="1"]{justify-content:center;padding:6px;width:auto}
+.wsm-nows-entry svg{flex:none}
+.wsm-nows-entry .wsm-nows-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 `;
 			document.head.appendChild(style);
 		}
@@ -1836,6 +1858,144 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 
+		//#region 无工作区入口（v2.5）：注入官方「新会话」按钮旁
+		// 为什么走 DOM 注入：官方侧边栏没有可用的多值插槽（sidebar.workspaces 是 single，
+		// 新会话按钮也不是插槽宿主），而这是用户点击频率最高的位置。选择器优先用
+		// CSS Modules 的稳定语义后缀 `_newSession`（哈希前缀会变、后缀不会），
+		// 再退化为本地化的 aria-label；结构变化时 fail-soft：不注入、不影响其它功能。
+		const NOWS_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">'
+			+ '<rect x="2.25" y="2.25" width="11.5" height="11.5" rx="2.6" stroke="currentColor" stroke-width="1.3" stroke-dasharray="2.6 2.1"/>'
+			+ '<path d="M8 5.6v4.8M5.6 8h4.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>';
+
+		function mountNoWorkspaceEntry(ctx, { rpcCall, disposers }) {
+			if (typeof document === "undefined") return;
+			// 服务实例在 apply 时捕获（fiber 失活后 ctx.get 会抛）；晚装载时点击期再取。
+			let sessionsRef = null;
+			let uiWorkspaceRef = null;
+			try { sessionsRef = ctx.get("sessions") ?? null; } catch { /* 服务可能尚未挂载 */ }
+			try { uiWorkspaceRef = ctx.get("uiWorkspace") ?? null; } catch { /* 服务可能尚未挂载 */ }
+			const serviceOf = (name, fallback) => {
+				if (fallback) return fallback;
+				try { return ctx.get(name) ?? null; } catch { return null; }
+			};
+			let supported = false; // 宿主确认支持后才显示（旧宿主静默隐藏）
+			let entry = null;
+			let anchor = null;
+			let creating = false;
+			let checking = false;
+
+			const findNewSessionButton = () => {
+				const byClass = [...document.querySelectorAll('button[class*="_newSession"]')].filter((el) => el.offsetParent !== null);
+				if (byClass.length > 0) return byClass[byClass.length - 1];
+				const labels = new Set([STRINGS.zh.newSessionLabel, STRINGS.en.newSessionLabel]);
+				for (const el of document.querySelectorAll("button[aria-label]")) {
+					if (labels.has(el.getAttribute("aria-label")) && el.closest("div[role='treeitem']") === null) return el;
+				}
+				return null;
+			};
+
+			const buildEntry = () => {
+				const el = document.createElement("button");
+				el.type = "button";
+				el.className = "wsm-nows-entry";
+				el.dataset.wsmNoWorkspace = "1";
+				el.setAttribute("aria-label", t("nowsEntryTitle"));
+				el.setAttribute("title", t("nowsEntryTitle"));
+				el.innerHTML = NOWS_ICON + '<span class="wsm-nows-label"></span>';
+				el.addEventListener("click", (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					void startNoWorkspaceSession();
+				});
+				return el;
+			};
+
+			const syncEntry = () => {
+				if (!entry || !anchor) return;
+				const wide = String(anchor.textContent ?? "").trim().length > 0;
+				entry.dataset.rail = wide ? "0" : "1";
+				const label = entry.querySelector(".wsm-nows-label");
+				if (label) label.textContent = t("nowsEntry");
+			};
+
+			const ensure = () => {
+				if (!supported) {
+					if (entry?.isConnected) entry.remove();
+					return;
+				}
+				try {
+					const target = findNewSessionButton();
+					if (!target) {
+						if (entry?.isConnected) entry.remove();
+						return;
+					}
+					anchor = target;
+					if (!entry) entry = buildEntry();
+					syncEntry();
+					if (entry.parentNode !== target.parentNode || target.nextElementSibling !== entry) {
+						if (typeof target.insertAdjacentElement === "function") target.insertAdjacentElement("afterend", entry);
+						else target.parentNode?.insertBefore(entry, target.nextSibling ?? null);
+					}
+				} catch { /* 结构变化期忽略，下一次 mutation 再试 */ }
+			};
+
+			async function startNoWorkspaceSession() {
+				if (creating) return;
+				creating = true;
+				try {
+					const res = await rpcCall(NO_WS_PREPARE_ENDPOINT, { title: t("nowsWorkspaceTitle") });
+					if (!res?.ok) throw new Error(res?.error?.message ?? "prepare failed");
+					const prepared = res.value ?? {};
+					const cwd = prepared.cwd;
+					if (typeof cwd !== "string" || cwd.length === 0) throw new Error(t("nowsCreateFailed", { msg: "no cwd returned by the host" }));
+					const sessions = serviceOf("sessions", sessionsRef);
+					if (!sessions || typeof sessions.create !== "function") throw new Error(t("nowsUnsupported"));
+					// DSH 的空白会话必须绑定工作区，官方 composer 才可输入：宿主会为临时目录临时
+					// 登记一个「无工作区」内部工作区，这里把会话建在它下面；迁移成功时自动删除登记。
+					const request = typeof prepared.workspaceId === "string" && prepared.workspaceId.length > 0
+						? { workspaceId: prepared.workspaceId }
+						: { cwd };
+					const sessionId = await sessions.create(request);
+					const navigation = serviceOf("uiWorkspace", uiWorkspaceRef);
+					try { navigation?.openSession?.(sessionId); } catch { /* 会话已创建，打开失败不影响 */ }
+					toast(t("nowsStarted", { cwd }));
+				} catch (err) {
+					toast(t("nowsCreateFailed", { msg: errMsg(err) }), true);
+				} finally {
+					creating = false;
+				}
+			}
+
+			const refreshSupport = async () => {
+				if (checking) return;
+				checking = true;
+				try {
+					const res = await rpcCall("mover.status");
+					supported = res?.ok === true && res.value?.capabilities?.noWorkspace === true;
+				} catch {
+					supported = false;
+				} finally {
+					checking = false;
+					ensure();
+				}
+			};
+
+			// 官方侧边栏的折叠/展开、工作区加载都会重建按钮：用观察器保证入口跟随。
+			let pending = null;
+			const schedule = () => {
+				if (pending !== null) return;
+				pending = setTimeout(() => { pending = null; ensure(); }, 60);
+				pending.unref?.();
+			};
+			const observer = new MutationObserver(schedule);
+			try { observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "aria-label"] }); } catch { /* ignore */ }
+			disposers.push(() => { try { observer.disconnect(); } catch { /* ignore */ } });
+			disposers.push(() => { if (pending !== null) clearTimeout(pending); });
+			disposers.push(() => { try { entry?.remove(); } catch { /* ignore */ } });
+			void refreshSupport();
+		}
+		//#endregion
+
 		// slots：设置页「会话救援」面板需要；未注入时访问 ctx.slots 会被宿主拒绝
 		var inject = ["connection", "slots"];
 
@@ -2513,6 +2673,7 @@ window.__ModuleLoader__.load({
 			} catch { /* ignore */ }
 
 			registerRescuePanel(ctx, rpcCall);
+			mountNoWorkspaceEntry(ctx, { rpcCall, disposers });
 
 			// teardown：宿主废弃本 fiber（桌面版热重载 / 客户端重组）时释放全部监听器。
 			// 没有这一步，重新装载会叠加第二份监听器，且旧闭包连同 pickedRows /
