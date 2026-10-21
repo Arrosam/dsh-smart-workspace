@@ -739,6 +739,23 @@ for (const rule of RENAME_DECISIONS) {
     }
   });
 }
+
+// Regression: full access must bypass approval for move/repair too — the approval
+// seam can be "unavailable" in full-access sessions, which previously blocked moves.
+for (const c of [
+  { sandbox: MODE.FULL, approval: OUTCOME.UNAVAILABLE, prompts: 0, ok: true },
+  { sandbox: MODE.WRITE, approval: OUTCOME.UNAVAILABLE, prompts: 1, ok: false }
+]) {
+  test(`move/repair decision: ${c.sandbox} + ${c.approval} -> ${c.prompts} prompt(s), ${c.ok ? 'runs' : 'refused'}`, async () => {
+    const host = mountHost({ sandbox: c.sandbox, approval: c.approval });
+    const move = host.runTool('mover_move_session', { sessionId: SESSION_ID, targetWorkspaceId: WS.B.id }, makeExec());
+    if (c.ok) assert.equal((await move).moved, true);
+    else await assert.rejects(move, /did not approve/);
+    const repair = host.runTool('mover_repair_sessions', {}, makeExec());
+    if (c.ok) await repair; else await assert.rejects(repair, /did not approve/);
+    assert.equal(host.spies.approval.length, c.prompts * 2, 'approval.request call count');
+  });
+}
 //#endregion
 
 //#region mover_rename_workspace — state transitions

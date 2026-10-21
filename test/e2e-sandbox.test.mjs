@@ -713,6 +713,40 @@ test('attach 失败 → 自动回滚到源目录并重新挂账', async () => {
   assert.ok(entityA.attached.includes('session-aaa'), 're-attached to source');
 });
 
+test('DSH 0.2 jsonl 后端：已打开的写句柄头改写到新 cwd，迁移前先 drain（压缩不再 ENOENT 旧路径）', async () => {
+  apply(ctx);
+  let drained = 0;
+  const writer = { header: Object.freeze({ id: 'session-aaa', cwd: A }), drainLive: async () => { drained++; } };
+  const memo = new Map([['session-aaa', {}]]);
+  ctx.sessionPersistence.tracker = { writers: new Map([['session-aaa', writer]]) };
+  ctx.sessionPersistence.coldLogMemo = memo;
+  ctx.get = (key) => {
+    if (key === 'agents') return { get: () => ({ status: 'idle' }) };
+    if (key === 'sessions') return { get: () => ({ id: 'session-aaa', header: { cwd: A } }) };
+    return undefined;
+  };
+  entityA.record.sessionIds.push('session-aaa');
+
+  const res = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(drained, 1, 'buffered events drained before reading the source');
+  assert.equal(writer.header.cwd, B, 'write handle header retargeted so appends/repairs hit the new path');
+  assert.equal(writer.header.id, 'session-aaa');
+  assert.ok(!memo.has('session-aaa'), 'cold-log memo invalidated');
+});
+
+test('写句柄改写后 attach 失败 → 写句柄头随回滚还原', async () => {
+  apply(ctx);
+  entityB.failAttach = true;
+  const priorHeader = Object.freeze({ id: 'session-aaa', cwd: A });
+  const writer = { header: priorHeader };
+  ctx.sessionPersistence.tracker = { writers: new Map([['session-aaa', writer]]) };
+  entityA.record.sessionIds.push('session-aaa');
+  const res = await call('mover.move', { sessionId: 'session-aaa', targetWorkspaceId: 'wid-b' });
+  assert.equal(res.ok, false);
+  assert.equal(writer.header, priorHeader, 'writer header restored');
+});
+
 test('常驻内存但空闲的会话允许迁移：刷新索引 + 官方 attach 记账 + 清理持久化状态', async () => {
   apply(ctx);
   const staleState = { meta: { cwd: A }, cursor: 1, owner: {} };
