@@ -289,6 +289,7 @@ dsh plugin --profile web add "link:C:/path/to/dsh-workspace-mover"
 - 宿主大版本升级若改变内部结构，相关能力可能降级或需重启后生效；搬家向导在无法安全写入时会在改动任何文件之前中止并提示；
 - **没有图形化设置页**：官方设置页需要宿主提供 `schemastery`（插件目录下不可解析，静态引入会打断启动）。策略改用环境变量配置，见下表；`mover_doctor` 会报告宿主服务与存储布局的降级情况；
 - **降级是可观测的**：插件优先使用官方接口（取消归档 `registry.unarchiveSession`、改名 `entity.setTitle`），宿主没有时自动回退到等价实现。回退是静默的（功能不变），所以 `mover.status.capabilities` 会同时给出 `unarchiveApi` / `setTitleApi` 能力位，`degradedFeatures` 里也会列出 `unarchive-official-api` / `set-title-official-api`——真机上一眼能看出走的是哪条路。
+- **Full access 下 agent 迁移仍可能被宿主拦截**：若 profile 启用了 DSH 实验性的 `@deepseek-ai/dsh-experimental-auto-review`（Auto review），它会在工具执行前用模型审查每次调用；Full access 预设的审批策略是 `never`，审查拒绝是最终拒绝、不会弹给你批准。插件自身在完全访问下已不再询问，但无法绕过宿主审查：可在 `~/.dsh/profiles/web/cordis.patch.yml` 里加 `- id: auto-review` + `disabled: true`（HMR 热生效），或改用 Auto 预设、在指令里写明具体会话与目标工作区。
 - **存储适配器也会明确报告降级**：公开 persistence 句柄可用但没有物理路径时，`storageAdapter` 为 `official-handle`，诊断与预览仍可用，物理移动会明确提示不支持；有物理根目录时标记为 `filesystem-fallback`，并由 `mover_doctor` 解释原因。
 
 ### 🔧 可调策略（环境变量）
