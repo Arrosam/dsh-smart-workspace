@@ -38,7 +38,7 @@ const RPC_CHANNEL = '/workspace-mover';
 const CODE = Object.freeze({ INVALID: 'invalid-input', NOT_FOUND: 'not-found', CONFLICT: 'conflict' });
 const MODE = Object.freeze({ FULL: 'danger-full-access', WRITE: 'workspace-write', READ: 'read-only' });
 /** Non-mode sandboxPolicy shapes (a plain MODE string means "service present, resolve returns that mode"). */
-const SANDBOX = Object.freeze({ ABSENT: 'absent', NO_RESOLVE: 'no-resolve', THROWS: 'throws', EMPTY_RESULT: 'empty-result' });
+const SANDBOX = Object.freeze({ ABSENT: 'absent', NO_RESOLVE: 'no-resolve', THROWS: 'throws', EMPTY_RESULT: 'empty-result', DEFAULT_FULL: 'default-full' });
 const OUTCOME = Object.freeze({ ALLOWED: 'allowed-once', REJECTED: 'rejected', CANCELLED: 'cancelled', UNAVAILABLE: 'unavailable' });
 /** Non-outcome approval seam shapes (a plain OUTCOME string means "request resolves to that outcome"). */
 const APPROVAL = Object.freeze({ ABSENT: 'absent', NO_REQUEST: 'no-request', THROWS: 'throws' });
@@ -127,6 +127,11 @@ function makeRegistry(spies) {
 function makeSandboxPolicy(kind, calls) {
   if (kind === SANDBOX.ABSENT) return undefined;
   if (kind === SANDBOX.NO_RESOLVE) return {};
+  if (kind === SANDBOX.DEFAULT_FULL) {
+    // Deployment default full access with no per-session override: resolve() returns no mode,
+    // so only the service's public defaultMode can prove the mode.
+    return { defaultMode: MODE.FULL, resolve(request) { calls.push(request); return {}; } };
+  }
   return {
     resolve(request) {
       calls.push(request);
@@ -202,7 +207,7 @@ function snapshotTree(dir) {
  * <root>/links (symlinks), <root>/home (DSH_HOME), <root>/store (session persistence).
  * Workspace A owns one real session archive so "sessions untouched" is observable.
  */
-function mountHost({ sandbox = MODE.WRITE, approval = OUTCOME.ALLOWED, tools = true } = {}) {
+function mountHost({ sandbox = MODE.WRITE, approval = OUTCOME.ALLOWED, tools = true, agents } = {}) {
   // Native realpath, matching the registry's fs.promises.realpath: the JS realpathSync keeps Windows 8.3
   // short names (C:\Users\RUNNER~1\...) and caller letter case, so every expected path would then differ
   // from the stored canonical one. Children joined below are created with exact case, so they stay canonical.
@@ -248,7 +253,7 @@ function mountHost({ sandbox = MODE.WRITE, approval = OUTCOME.ALLOWED, tools = t
     workspaceRegistry: registry,
     sessionPersistence: makePersistence(paths.store),
     logger: { info() {}, warn() {}, error() {}, debug() {} },
-    get: (key) => (key === 'sandboxPolicy' ? sandboxPolicy : undefined),
+    get: (key) => (key === 'sandboxPolicy' ? sandboxPolicy : key === 'agents' ? agents : undefined),
     effect(register) {
       const cleanup = register();
       if (typeof cleanup === 'function') cleanups.push(cleanup);
@@ -304,11 +309,26 @@ function mountHost({ sandbox = MODE.WRITE, approval = OUTCOME.ALLOWED, tools = t
   return host;
 }
 
-function makeExec({ agent = true } = {}) {
+function makeExec({ agent = true, session = CALLER_SESSION } = {}) {
   const signal = new AbortController().signal;
   const callId = `call-${randomUUID()}`;
-  return agent ? { agent: { id: 'agent-caller', session: CALLER_SESSION }, signal, callId } : { signal, callId };
+  return agent ? { agent: { id: 'agent-caller', session }, signal, callId } : { signal, callId };
 }
+
+/** A fake host `agents` service: only the ids in `running` report status 'running'. */
+function makeAgents(running = []) {
+  const set = new Set(running.map(String));
+  return {
+    get: (sessionId) => (set.has(String(sessionId)) ? { id: String(sessionId), status: 'running' } : undefined),
+    setRunning(ids) { set.clear(); for (const id of ids) set.add(String(id)); }
+  };
+}
+
+/** Session objects whose logs carry the official permission events (same fold the host services read). */
+const sessionWithEvents = (events) => ({ id: 'session-caller', events });
+const NEVER_SESSION = sessionWithEvents([{ type: 'permission/preset', data: { preset: 'danger-full-access' } }, { type: 'approval/policy', data: { policy: 'never' } }]);
+const ASK_SESSION = sessionWithEvents([{ type: 'approval/policy', data: { policy: 'ask' } }]);
+const LOGGED_FULL_ACCESS_SESSION = sessionWithEvents([{ type: 'sandbox/mode', data: { mode: MODE.FULL } }, { type: 'approval/policy', data: { policy: 'never' } }]);
 
 const outcomeOf = (value) => () => value;
 //#endregion
@@ -756,6 +776,118 @@ for (const c of [
     assert.equal(host.spies.approval.length, c.prompts * 2, 'approval.request call count');
   });
 }
+//#endregion
+
+//#region auto-execution without a prompt: full access / approval policy "never"
+// Full access alone bypasses the prompt (official plugin_manager precedent: the requested mode
+// already equals the effective mode). Approval policy "never" is deliberately NOT a proxy for
+// full access — delegated/headless confined sessions are pinned to never — and an unreadable
+// sandbox mode still fails closed rather than guessing.
+const AUTO_DECISIONS = [
+  { id: 'A01', sandbox: MODE.WRITE, approval: OUTCOME.REJECTED, session: NEVER_SESSION, refused: true, why: 'approval never alone is not full access: asks and fails closed' },
+  { id: 'A02', sandbox: SANDBOX.ABSENT, approval: OUTCOME.REJECTED, session: NEVER_SESSION, refused: true, why: 'unreadable sandbox mode is not full access: asks and fails closed' },
+  { id: 'A03', sandbox: SANDBOX.EMPTY_RESULT, approval: OUTCOME.REJECTED, session: LOGGED_FULL_ACCESS_SESSION, why: 'resolve returns nothing; log fold proves full access' },
+  { id: 'A04', sandbox: SANDBOX.THROWS, approval: OUTCOME.REJECTED, session: LOGGED_FULL_ACCESS_SESSION, why: 'resolve throws; log fold proves full access' },
+  { id: 'A05', sandbox: SANDBOX.DEFAULT_FULL, approval: OUTCOME.REJECTED, session: CALLER_SESSION, why: 'deployment defaultMode is full access' },
+  { id: 'A06', sandbox: MODE.WRITE, approval: OUTCOME.REJECTED, session: ASK_SESSION, refused: true, why: 'ask policy still consults the refusing seam (fail-closed)' },
+  { id: 'A07', sandbox: MODE.WRITE, approval: APPROVAL.ABSENT, session: ASK_SESSION, why: 'no approval seam at all: conversational confirmation fallback' }
+];
+for (const c of AUTO_DECISIONS) {
+  test(`move tool auto-execution ${c.id}: ${c.why} -> ${c.refused ? 'refused' : 'moves'}`, async () => {
+    const host = mountHost({ sandbox: c.sandbox, approval: c.approval });
+    const exec = makeExec({ session: c.session });
+    const call = host.runTool(TOOL.MOVE, { sessionId: SESSION_ID, targetWorkspaceId: WS.B.id }, exec);
+    if (c.refused) await assert.rejects(call, /did not approve/);
+    else assert.equal((await call).moved, true);
+    assert.equal(host.spies.approval.length, c.refused ? 1 : 0, 'approval.request call count');
+  });
+}
+
+test('repair tool under full access runs without asking or touching files', async () => {
+  const host = mountHost({ sandbox: MODE.FULL, approval: OUTCOME.REJECTED });
+  const value = await host.runTool(TOOL.REPAIR, {}, makeExec());
+  assert.equal(typeof value, 'object');
+  assert.equal(host.spies.approval.length, 0, 'no prompt under full access');
+});
+
+test('rename tool under full access renames without asking', async () => {
+  const host = mountHost({ sandbox: MODE.FULL, approval: OUTCOME.REJECTED });
+  const value = await host.runTool(TOOL.RENAME, { workspaceId: WS.A.id, name: NEW_TITLE }, makeExec());
+  assert.equal(value.changed, true);
+  assert.equal(host.entityA.title, NEW_TITLE);
+  assert.equal(host.spies.approval.length, 0, 'no prompt under full access');
+});
+
+// A running session is never touched: the move is accepted into the persistent queue. That is a
+// success for the model (accepted + queued), NOT an error, so it cannot misread it as "not moved".
+test('move tool on a running session -> accepted/queued result, queue record persisted, archive untouched', async () => {
+  const host = mountHost({ sandbox: MODE.FULL, agents: makeAgents([SESSION_ID]) });
+  const before = readFileSync(host.sessionArtifact);
+  const value = await host.runTool(TOOL.MOVE, { sessionId: SESSION_ID, targetWorkspaceId: WS.B.id }, makeExec());
+  assert.equal(value.accepted, true);
+  assert.equal(value.queued, true);
+  assert.equal(typeof value.queueTaskId, 'string');
+  assert.equal(value.queueState, 'waiting-for-idle');
+  assert.match(String(value.note), /Do not retry/);
+  assert.equal(host.spies.approval.length, 0, 'full access never asks');
+  assert.deepEqual(readFileSync(host.sessionArtifact), before, 'session archive untouched while running');
+  const migrations = JSON.parse(readFileSync(join(host.paths.home, 'workspace-mover', 'migrations.json'), 'utf8'));
+  const task = migrations.tasks.find((t) => t.id === value.queueTaskId);
+  assert.ok(task, 'queue record persisted');
+  assert.equal(task.state, 'waiting-for-idle');
+  assert.equal(task.sessionId, SESSION_ID);
+  assert.equal(task.targetWorkspaceId, WS.B.id);
+});
+
+test('list tool exposes queued migrations so a later turn can verify completion', async () => {
+  const host = mountHost({ sandbox: MODE.FULL, agents: makeAgents([SESSION_ID]) });
+  const queued = await host.runTool(TOOL.MOVE, { sessionId: SESSION_ID, targetWorkspaceId: WS.B.id }, makeExec());
+  const listed = await host.runTool(TOOL.LIST, {}, makeExec());
+  const entry = (listed.migrations ?? []).find((m) => m.id === queued.queueTaskId);
+  assert.ok(entry, 'queued migration listed');
+  assert.equal(entry.state, 'waiting-for-idle');
+  assert.equal(entry.sessionId, SESSION_ID);
+  assert.equal(entry.targetWorkspaceId, WS.B.id);
+  assert.equal(entry.completedAt, null);
+  assert.equal(entry.toCwd, null);
+});
+
+test('list tool drains nothing (read-only), the default RPC drain completes the queued move and reports done + toCwd', async () => {
+  const agents = makeAgents([SESSION_ID]);
+  const host = mountHost({ sandbox: MODE.FULL, agents });
+  const queued = await host.runTool(TOOL.MOVE, { sessionId: SESSION_ID, targetWorkspaceId: WS.B.id }, makeExec());
+  agents.setRunning([]); // session becomes idle after the turn
+  const peeked = await host.runTool(TOOL.LIST, {}, makeExec());
+  assert.equal(peeked.migrations.find((m) => m.id === queued.queueTaskId).state, 'waiting-for-idle', 'read-only list did not advance the queue');
+  assert.equal(readHeader(readFileSync(artifactPath(host.paths.store, host.paths.A, SESSION_ID))).cwd, host.paths.A, 'session still in the source workspace');
+  const drained = expectRpcOk(await host.rpc('mover.migrations.list'));
+  const done = drained.items.find((m) => m.id === queued.queueTaskId);
+  assert.equal(done.state, 'done');
+  assert.equal(done.result.to.cwd, host.paths.B);
+  assert.equal(typeof done.completedAt, 'string');
+  assert.equal(readHeader(readFileSync(artifactPath(host.paths.store, host.paths.B, SESSION_ID))).cwd, host.paths.B, 'move executed by the drain');
+});
+
+test('move tool retry after completion -> { alreadyInTarget:true } instead of a conflict error', async () => {
+  const host = mountHost({ sandbox: MODE.FULL });
+  const first = await host.runTool(TOOL.MOVE, { sessionId: SESSION_ID, targetWorkspaceId: WS.B.id }, makeExec());
+  assert.equal(first.moved, true);
+  assert.equal(first.verified, true);
+  const retry = await host.runTool(TOOL.MOVE, { sessionId: SESSION_ID, targetWorkspaceId: WS.B.id }, makeExec());
+  assert.equal(retry.alreadyInTarget, true);
+  assert.equal(retry.moved, false);
+  assert.equal(readHeader(readFileSync(artifactPath(host.paths.store, host.paths.B, SESSION_ID))).cwd, host.paths.B);
+});
+
+test('list tool reports recent completed moves so the model can confirm them', async () => {
+  const host = mountHost({ sandbox: MODE.FULL });
+  await host.runTool(TOOL.MOVE, { sessionId: SESSION_ID, targetWorkspaceId: WS.B.id }, makeExec());
+  const listed = await host.runTool(TOOL.LIST, {}, makeExec());
+  const recent = (listed.recentMoves ?? []).find((m) => m.sessionId === SESSION_ID);
+  assert.ok(recent, 'completed move listed');
+  assert.equal(recent.to, host.paths.B);
+  assert.equal(typeof recent.movedAt, 'string');
+});
 //#endregion
 
 //#region mover_rename_workspace — state transitions

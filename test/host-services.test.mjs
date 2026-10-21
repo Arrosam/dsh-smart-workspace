@@ -10,7 +10,7 @@
 //      the callback runs again with a fresh child when the service comes back.
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import * as plugin from '../lib/index.js';
@@ -47,8 +47,12 @@ function makeCordisHost(initial) {
 		for (const key of names) {
 			const value = services.get(key);
 			// A registration made through a child context is that child's effect (dsh-tools
-			// `register` returns a disposer tied to the calling fiber).
-			ctx[key] = key === 'tools' ? { ...value, register: (def) => { const off = value.register(def); fiber.effect(() => off); return off; } } : value;
+			// `register` / systemPrompt `context` return a disposer tied to the calling fiber).
+			ctx[key] = key === 'tools'
+				? { ...value, register: (def) => { const off = value.register(def); fiber.effect(() => off); return off; } }
+				: key === 'systemPrompt'
+					? { ...value, context: (spec) => { const off = value.context(spec); fiber.effect(() => off); return off; } }
+					: value;
 		}
 		return ctx;
 	};
@@ -266,7 +270,65 @@ for (const [toolName, args] of [
 }
 //#endregion
 
-//#region 6. non-cordis hosts
+//#region 6. system-prompt move notice
+test('systemPrompt context tells the model when a move completed or is still queued', async () => {
+  const host = mountCordis();
+  const contexts = new Map();
+  host.provide('systemPrompt', {
+    context(spec) { contexts.set(spec.name, spec); return () => contexts.delete(spec.name); }
+  });
+  assert.ok(contexts.has('workspace-mover:last-move'), 'move notice registered with the prompt registry');
+  const spec = contexts.get('workspace-mover:last-move');
+  const session = { id: 'session-x' };
+  assert.equal(spec.text({ agent: { session } }), '', 'no move data -> contributes nothing');
+
+  const dataDir = join(process.env.DSH_HOME, 'workspace-mover');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'history.json'), JSON.stringify([{
+    id: 'move-1', sessionId: 'session-x', title: 'X', sourceWorkspaceId: 'wid-a', targetWorkspaceId: 'wid-b',
+    from: '/old/x', to: '/new/x', movedAt: '2026-01-02T03:04:05.000Z', backup: null
+  }], null, 2));
+  assert.match(spec.text({ agent: { session } }), /moved into workspace "\/new\/x".*completed.*do not retry/s);
+
+  // A batch history entry is evidence for every session it moved.
+  writeFileSync(join(dataDir, 'history.json'), JSON.stringify([{
+    id: 'move-batch', sessionId: null, targetWorkspaceId: 'wid-b', to: '/new/batch',
+    movedAt: '2026-01-02T04:00:00.000Z',
+    sessions: [{ sessionId: 'session-y', title: 'Y', from: '/old/y', sourceWorkspaceId: 'wid-a', backup: null }]
+  }], null, 2));
+  assert.match(spec.text({ agent: { session: { id: 'session-y' } } }), /moved into workspace "\/new\/batch"/);
+
+  // A pending queue record outranks the earlier completed move: report the truth, do not claim completion.
+  writeFileSync(join(dataDir, 'migrations.json'), JSON.stringify({ version: 1, tasks: [{
+    id: 'migration-1', sessionId: 'session-x', title: null, targetWorkspaceId: 'wid-b', sourceWorkspaceId: null,
+    state: 'waiting-for-idle', attempts: 0, createdAt: '2026-01-02T05:00:00.000Z', updatedAt: '2026-01-02T05:00:00.000Z',
+    lastError: 'session is currently running; waiting for idle', lastAttemptAt: null, completedAt: null
+  }] }, null, 2));
+  const pending = spec.text({ agent: { session } });
+  assert.match(pending, /is queued/);
+  assert.match(pending, /do not request it again/);
+  assert.doesNotMatch(pending, /completed/);
+
+  // Failed queue record: say it was NOT moved and point at the recovery path.
+  const queue = JSON.parse(readFileSync(join(dataDir, 'migrations.json'), 'utf8'));
+  queue.tasks[0].state = 'failed';
+  queue.tasks[0].lastError = 'target not writable: EACCES';
+  writeFileSync(join(dataDir, 'migrations.json'), JSON.stringify(queue, null, 2));
+  const failed = spec.text({ agent: { session } });
+  assert.match(failed, /FAILED: target not writable/);
+  assert.match(failed, /was not moved/);
+
+  // Diagnostics (no agent) and unrelated sessions contribute nothing.
+  assert.equal(spec.text({}), '');
+  assert.equal(spec.text({ agent: { session: { id: 'session-unknown' } } }), '');
+
+  // Registration follows the service lifecycle.
+  host.remove('systemPrompt');
+  assert.equal(contexts.has('workspace-mover:last-move'), false, 'context disposed with the service');
+});
+//#endregion
+
+//#region 7. non-cordis hosts
 test('a host without inject still gets tools from ctx.tools and approval from ctx.approval', async () => {
 	const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'wsm-hostsvc-plain-')));
 	const a = join(root, 'alpha');
