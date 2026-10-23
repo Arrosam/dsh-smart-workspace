@@ -1351,6 +1351,13 @@ test('no-workspace: begin queues while the session runs, drains after idle, and 
   assert.ok(resume.content[0].text.includes(JSON.stringify(created.path)), `resume message names ${created.path}`);
 });
 
+test('no-workspace: approval-gated tools declare a human-sized timeout', () => {
+  const host = mountHost();
+  // 60s 在实机里会让还没点的审批弹窗直接超时取消；工具必须给用户留足确认时间。
+  assert.ok(host.tool(NOWS.BEGIN).timeoutMs >= 180000, `mover_begin_workspace.timeoutMs=${host.tool(NOWS.BEGIN).timeoutMs}`);
+  assert.ok(host.tool(TOOL.MOVE).timeoutMs >= 180000, `mover_move_session.timeoutMs=${host.tool(TOOL.MOVE).timeoutMs}`);
+});
+
 test('no-workspace: the selector title is environment-configurable and the no-target error carries details', async () => {
   const previous = process.env.DSH_WORKSPACE_MOVER_NO_WORKSPACE_TITLE;
   process.env.DSH_WORKSPACE_MOVER_NO_WORKSPACE_TITLE = '无工作区';
