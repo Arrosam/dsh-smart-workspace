@@ -155,13 +155,16 @@ test('readRepoInfo 读取普通仓库与 worktree 的 origin，workspaceMatchesR
 		assert.equal(workspaceMatchesRepository(plain, 'dsh-smart-workspace'), true, 'folder/tail name also matches');
 		assert.equal(workspaceMatchesRepository(plain, 'github.com/other/repo'), false);
 
-		// worktree 的 .git 是文件，config 在 gitdir 指向的目录里
+		// 真实 worktree 布局：<worktree>/.git 是指针文件 → <main>/.git/worktrees/<name>；
+		// 该目录里的 commondir 指回主仓库 .git，remote 配置在主仓库的 config 里（不是 gitdir）。
+		const main = join(root, 'main-repo');
 		const worktree = join(root, 'worktree');
-		const gitdir = join(root, 'gitdirs', 'worktree');
-		mkdirSync(worktree, { recursive: true });
+		const gitdir = join(main, '.git', 'worktrees', 'worktree');
 		mkdirSync(gitdir, { recursive: true });
+		mkdirSync(worktree, { recursive: true });
+		writeFileSync(join(main, '.git', 'config'), '[remote "origin"]\n\turl = git@github.com:Arrosam/other-repo.git\n');
 		writeFileSync(join(worktree, '.git'), `gitdir: ${gitdir}\n`);
-		writeFileSync(join(gitdir, 'config'), '[remote "origin"]\n\turl = git@github.com:Arrosam/other-repo.git\n');
+		writeFileSync(join(gitdir, 'commondir'), '../..\n');
 		assert.equal(readRepoInfo(worktree)?.identity, 'github.com/arrosam/other-repo');
 		assert.equal(workspaceMatchesRepository(worktree, 'other-repo'), true);
 

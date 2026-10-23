@@ -265,7 +265,12 @@ function mountHost({ sandbox = MODE.WRITE, approval = OUTCOME.ALLOWED, tools = t
     workspaceRegistry: registry,
     sessionPersistence: makePersistence(paths.store),
     logger: { info() {}, warn() {}, error() {}, debug() {} },
-    get: (key) => (key === 'sandboxPolicy' ? sandboxPolicy : key === 'agents' ? agents : services[key]),
+    get: (key) => {
+      if (key === 'sandboxPolicy') return sandboxPolicy;
+      if (key === 'agents') return agents;
+      if (key === 'workspaceController') return services.workspaceController ?? { config: { documentsDirectory: paths.docs } };
+      return services[key];
+    },
     effect(register) {
       const cleanup = register();
       if (typeof cleanup === 'function') cleanups.push(cleanup);
@@ -1183,58 +1188,69 @@ function nowsServices(host, sessionController) {
   };
 }
 
-test('no-workspace: prepare creates a read-only temp folder under the DSH default workspace', async () => {
+test('no-workspace: prepare creates ONE shared read-only scratch workspace (idempotent)', async () => {
   const host = mountHost();
-  host.ctx.get = (key) => (key === 'workspaceController' ? { config: { documentsDirectory: host.paths.docs } } : undefined);
-  const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE, { title: '无工作区' }));
+  const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE));
+  const tempRoot = join(host.paths.docs, 'deepseek-harness', 'default-workspace', '.workspace-mover-tmp');
   assert.equal(prepared.readOnly, true);
-  assert.ok(prepared.cwd.startsWith(join(host.paths.docs, 'deepseek-harness', 'default-workspace', '.workspace-mover-tmp')), prepared.cwd);
+  assert.equal(prepared.tempRoot, tempRoot);
+  assert.equal(prepared.cwd, join(tempRoot, 'scratch'), 'all no-workspace sessions share the same scratch folder');
   assert.equal(statSync(prepared.cwd).isDirectory(), true);
   assert.equal(statSync(prepared.cwd).mode & 0o200, 0, 'owner write bit must be clear (read-only on disk)');
-  // DSH requires a workspace for a blank session's composer, so the host registers a temporary
-  // internal workspace over the folder (removed automatically once the session migrates).
-  assert.equal(typeof prepared.workspaceId, 'string');
-  assert.equal(prepared.workspaceTitle, '无工作区');
-  assert.equal(host.registry.get(prepared.workspaceId).path, prepared.cwd);
-  assert.equal(host.registry.get(prepared.workspaceId).title, '无工作区');
-  // a second prepare yields a distinct folder; the DSH default workspace itself stays untouched
-  const second = expectRpcOk(await host.rpc(NOWS.PREPARE, { title: '无工作区' }));
-  assert.notEqual(second.cwd, prepared.cwd);
-  assert.notEqual(second.workspaceId, prepared.workspaceId);
-  assert.equal(readdirSync(join(host.paths.docs, 'deepseek-harness', 'default-workspace')).length, 1, 'only the hidden temp container lives there');
+  // It is a real workspace: that is what makes it an option in the workspace selector and what
+  // gives a blank session a usable composer.
+  assert.equal(prepared.workspaceTitle, 'No workspace');
+  const entity = host.registry.get(prepared.workspaceId);
+  assert.ok(entity, 'the scratch folder is registered as a workspace');
+  assert.equal(entity.path, prepared.cwd);
+  assert.equal(entity.title, 'No workspace');
+
+  // idempotent: a second ensure reuses the same workspace instead of piling up groups
+  const again = expectRpcOk(await host.rpc(NOWS.PREPARE));
+  assert.equal(again.workspaceId, prepared.workspaceId);
+  assert.equal(again.cwd, prepared.cwd);
+  assert.equal(host.registry.list().filter((item) => String(item.path).startsWith(tempRoot)).length, 1, 'exactly one no-workspace workspace');
 });
 
-test('no-workspace: begin joins an existing workspace by repository identity, moves content, deletes the temp folder', async () => {
+test('no-workspace: begin joins an existing workspace by repository identity, moves scratch content, keeps the scratch', async () => {
   const sessionController = makeSessionController();
-  const host = mountHost({ agents: makeAgents([]), services: {} });
+  const host = mountHost({ agents: makeAgents([]) });
   Object.assign(host.services, nowsServices(host, sessionController));
   // workspace A becomes "the workspace already handling github.com/Arrosam/dsh-smart-workspace"
   mkdirSync(join(host.paths.A, '.git'), { recursive: true });
   writeFileSync(join(host.paths.A, '.git', 'config'), GIT_CONFIG);
 
-  const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE, {}));
-  const tempCwd = prepared.cwd;
+  const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE));
+  const scratch = prepared.cwd;
   const callerId = 'session-nows';
-  writeSessionAt(host, callerId, tempCwd);
-  // contents that already existed in the temp folder + a name collision in the target
-  chmodSync(tempCwd, 0o700);
-  writeFileSync(join(tempCwd, 'notes.txt'), 'from temp');
-  mkdirSync(join(tempCwd, 'sub'));
-  writeFileSync(join(tempCwd, 'sub', 'nested.txt'), 'nested');
-  chmodSync(tempCwd, 0o500);
+  writeSessionAt(host, callerId, scratch);
+  // contents that already existed in the scratch folder + name collisions in the target
+  chmodSync(scratch, 0o700);
+  writeFileSync(join(scratch, 'notes.txt'), 'from temp');
+  mkdirSync(join(scratch, 'sub'));
+  writeFileSync(join(scratch, 'sub', 'nested.txt'), 'nested');
+  chmodSync(scratch, 0o500);
   writeFileSync(join(host.paths.A, 'notes.txt'), 'existing');
 
   // the list tool exposes the reverse-lookup data the model uses
   const listed = await host.runTool(TOOL.LIST, {});
   assert.equal(listed.sessions.find((row) => row.sessionId === callerId)?.noWorkspace, true);
   assert.equal(listed.workspaces.find((row) => row.workspaceId === WS.A.id)?.repo?.identity, 'github.com/arrosam/dsh-smart-workspace');
-  assert.equal(listed.workspaces.find((row) => row.workspaceId === prepared.workspaceId)?.ephemeral, true, 'the temporary workspace is flagged');
+  assert.equal(listed.workspaces.find((row) => row.workspaceId === prepared.workspaceId)?.ephemeral, true, 'the shared scratch workspace is flagged');
+
+  // moving INTO the scratch workspace is not allowed (it is not persistent)
+  const intoScratch = await host.rpc(NOWS.BEGIN_RPC, { sessionId: callerId, workspaceId: prepared.workspaceId });
+  assert.equal(intoScratch.ok, false, JSON.stringify(intoScratch));
+  assert.equal(intoScratch.error.code, 'invalid-input');
 
   // not running -> the RPC moves immediately
   const moved = expectRpcOk(await host.rpc(NOWS.BEGIN_RPC, { sessionId: callerId, repository: 'Arrosam/dsh-smart-workspace' }));
   assert.equal(moved.moved, true);
   assert.equal(moved.to.cwd, host.paths.A);
-  assert.equal(existsSync(tempCwd), false, 'temp folder deleted after the move');
+  assert.equal(moved.workspaceFiles.shared, true, 'the relocation reports the shared scratch folder');
+  assert.equal(moved.workspaceFiles.removed, false, 'the shared scratch folder is never deleted');
+  assert.equal(existsSync(scratch), true, 'scratch folder kept for other no-workspace sessions');
+  assert.equal(statSync(scratch).mode & 0o200, 0, 'scratch folder restored to read-only');
   assert.equal(readFileSync(join(host.paths.A, 'notes.txt'), 'utf8'), 'existing', 'existing target file is never overwritten');
   const renamed = moved.workspaceFiles.renamed.find((item) => item.name === 'notes.txt');
   assert.ok(renamed, 'colliding name was renamed');
@@ -1244,15 +1260,14 @@ test('no-workspace: begin joins an existing workspace by repository identity, mo
   assert.equal(readFileSync(join(host.paths.A, renamedSub.to, 'nested.txt'), 'utf8'), 'nested');
   assert.equal(readHeader(readFileSync(findArtifact(host, callerId))).cwd, host.paths.A);
   assert.ok(host.entityA.sessionIds.includes(callerId));
-  assert.equal(host.registry.get(prepared.workspaceId), undefined, 'the temporary no-workspace workspace registration is removed');
+  assert.ok(host.registry.get(prepared.workspaceId), 'the shared workspace registration is kept');
   const history = expectRpcOk(await host.rpc('mover.history', {}));
   assert.equal(history.items[0].sessionId, callerId);
-  assert.equal(history.items[0].sourceWorkspaceId, null, 'the removed temporary workspace is not recorded as an undo target');
+  assert.equal(history.items[0].sourceWorkspaceId, null, 'the no-workspace scratch is not recorded as an undo target');
 
-  // a "new workspace" directory inside the temporary container is rejected (it would be swept/deleted)
-  const preparedAgain = expectRpcOk(await host.rpc(NOWS.PREPARE, { title: 'No workspace' }));
-  writeSessionAt(host, 'session-inside', preparedAgain.cwd);
-  const badTarget = await host.rpc(NOWS.BEGIN_RPC, { sessionId: 'session-inside', directory: join(preparedAgain.cwd, 'nested-workspace') });
+  // a "new workspace" directory inside the temporary container is rejected
+  writeSessionAt(host, 'session-inside', scratch);
+  const badTarget = await host.rpc(NOWS.BEGIN_RPC, { sessionId: 'session-inside', directory: join(scratch, 'nested-workspace') });
   assert.equal(badTarget.ok, false, 'workspace directory inside the temp container must be rejected');
   assert.equal(badTarget.error.code, 'invalid-input');
 
@@ -1268,7 +1283,7 @@ test('no-workspace: begin joins an existing workspace by repository identity, mo
   assert.equal(wrong.ok, true, JSON.stringify(wrong));
   assert.equal(wrong.value.alreadyInTarget, true, 'a session already in a persistent workspace reports alreadyInTarget');
   assert.equal(existsSync(strayDir), false, 'no target folder is created for a session that is not in no-workspace mode');
-  assert.equal(host.registry.list().some((entity) => entity.path === strayDir), false);
+  assert.equal(host.registry.list().some((item) => item.path === strayDir), false);
 });
 
 test('no-workspace: begin queues while the session runs, drains after idle, and resumes the session automatically', async () => {
@@ -1277,15 +1292,18 @@ test('no-workspace: begin queues while the session runs, drains after idle, and 
   const host = mountHost({ agents });
   Object.assign(host.services, nowsServices(host, sessionController));
 
-  const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE, { title: 'No workspace' }));
-  const tempCwd = prepared.cwd;
-  writeSessionAt(host, CALLER_SESSION.id, tempCwd);
+  const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE));
+  const scratch = prepared.cwd;
+  writeSessionAt(host, CALLER_SESSION.id, scratch);
+  chmodSync(scratch, 0o700);
+  writeFileSync(join(scratch, 'draft.txt'), 'draft');
+  chmodSync(scratch, 0o500);
 
   const result = await host.runTool(NOWS.BEGIN, { directory: join(host.paths.root, 'new-project') }, makeExec({ session: { id: CALLER_SESSION.id } }));
   assert.equal(result.queued, true, JSON.stringify(result));
   assert.equal(result.willResume, true);
   assert.equal(typeof result.queueTaskId, 'string');
-  assert.equal(existsSync(tempCwd), true, 'nothing is touched while the session is running');
+  assert.equal(existsSync(scratch), true, 'nothing is touched while the session is running');
 
   // The queue record survives for the model/panel and reports the resume intent.
   const queuedList = await host.rpc('mover.migrations.list', { drain: false });
@@ -1301,11 +1319,12 @@ test('no-workspace: begin queues while the session runs, drains after idle, and 
 
   const task = (await host.rpc('mover.migrations.list', { drain: false })).value.items.find((item) => item.id === result.queueTaskId);
   assert.equal(task.state, 'done', JSON.stringify(task));
-  assert.equal(existsSync(tempCwd), false, 'temp folder removed by the queued move');
-  assert.equal(host.registry.list().some((entity) => entity.path === tempCwd), false, 'the temporary workspace registration is gone');
+  assert.equal(existsSync(scratch), true, 'the shared scratch folder is kept by the queued move');
+  assert.ok(host.registry.get(prepared.workspaceId), 'the shared workspace registration is kept');
   assert.ok(existsSync(join(host.paths.root, 'new-project')), 'new workspace folder created');
-  const created = host.registry.list().find((entity) => entity.path === join(host.paths.root, 'new-project'));
+  const created = host.registry.list().find((item) => item.path === join(host.paths.root, 'new-project'));
   assert.ok(created, 'new folder registered as a workspace');
+  assert.equal(readFileSync(join(created.path, 'draft.txt'), 'utf8'), 'draft', 'scratch contents follow the session');
   assert.equal(readHeader(readFileSync(findArtifact(host, CALLER_SESSION.id))).cwd, created.path);
   assert.equal(sessionController.prompts.length, 1, 'session resumed exactly once');
   const resume = sessionController.prompts[0];
@@ -1315,6 +1334,33 @@ test('no-workspace: begin queues while the session runs, drains after idle, and 
   // 文案里的路径经过 JSON.stringify（Windows 反斜杠会被转义两次），直接按字符串包含断言，
   // 不要再把路径当正则用。
   assert.ok(resume.content[0].text.includes(JSON.stringify(created.path)), `resume message names ${created.path}`);
+});
+
+test('no-workspace: the selector title is environment-configurable and the no-target error carries details', async () => {
+  const previous = process.env.DSH_WORKSPACE_MOVER_NO_WORKSPACE_TITLE;
+  process.env.DSH_WORKSPACE_MOVER_NO_WORKSPACE_TITLE = '无工作区';
+  try {
+    const host = mountHost();
+    const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE));
+    assert.equal(prepared.workspaceTitle, '无工作区', 'the option can be localized per deployment');
+
+    const tempRoot = prepared.tempRoot;
+    writeSessionAt(host, 'session-details', prepared.cwd);
+    const res = await host.rpc(NOWS.BEGIN_RPC, { sessionId: 'session-details', repository: 'nobody/nothing-here' });
+    assert.equal(res.ok, false, JSON.stringify(res));
+    assert.equal(res.error.code, 'invalid-input');
+    assert.ok(Array.isArray(res.error.details?.knownWorkspaces), 'the error lists known workspaces (mapError preserves details)');
+    assert.ok(res.error.details.knownWorkspaces.length >= 2);
+
+    // moving a session straight into the shared scratch via mover.move is rejected too
+    const moveRes = await host.rpc('mover.move', { sessionId: 'session-details', targetWorkspaceId: prepared.workspaceId });
+    assert.equal(moveRes.ok, false, JSON.stringify(moveRes));
+    assert.equal(moveRes.error.code, 'invalid-input');
+    void tempRoot;
+  } finally {
+    if (previous === undefined) delete process.env.DSH_WORKSPACE_MOVER_NO_WORKSPACE_TITLE;
+    else process.env.DSH_WORKSPACE_MOVER_NO_WORKSPACE_TITLE = previous;
+  }
 });
 
 function findArtifact(host, sessionId) {

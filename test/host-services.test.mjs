@@ -399,26 +399,33 @@ test('a host without inject still gets tools from ctx.tools and approval from ct
 //#endregion
 
 //#region 8. no-workspace mode (v2.5)
-test('no-workspace: prepare creates a read-only temp folder and doctor/status report the mode', async () => {
+test('no-workspace: the "No workspace" option is one shared read-only scratch workspace', async () => {
 	const host = mountCordis();
 	host.provide('workspaceController', { config: { documentsDirectory: host.docs } });
-	const res = await host.rpc('mover.nows.prepare', { title: '无工作区' });
+	const res = await host.rpc('mover.nows.prepare');
 	assert.equal(res.ok, true, JSON.stringify(res.error));
 	const { cwd, defaultWorkspaceRoot, tempRoot, readOnly, workspaceId, workspaceTitle } = res.value;
 	assert.equal(readOnly, true);
-	assert.equal(workspaceTitle, '无工作区');
-	assert.equal(workspaceId, host.registry.list().find((entity) => entity.path === cwd)?.id, 'a temporary workspace is registered over the folder');
-	assert.equal(host.registry.get(workspaceId).title, '无工作区');
+	assert.equal(workspaceTitle, 'No workspace');
+	assert.equal(workspaceId, host.registry.list().find((entity) => entity.path === cwd)?.id, 'a real workspace is registered over the folder');
+	assert.equal(host.registry.get(workspaceId).title, 'No workspace');
 	assert.equal(defaultWorkspaceRoot, realpathSync(join(host.docs, 'deepseek-harness', 'default-workspace')));
 	assert.equal(tempRoot, join(defaultWorkspaceRoot, '.workspace-mover-tmp'));
 	assert.ok(cwd.startsWith(tempRoot + sep));
+	assert.equal(cwd, join(tempRoot, 'scratch'), 'every no-workspace session shares this folder');
 	const stats = statSync(cwd);
 	assert.equal(stats.isDirectory(), true);
-	assert.equal(stats.mode & 0o200, 0, 'temp folder must be read-only on disk');
+	assert.equal(stats.mode & 0o200, 0, 'scratch folder must be read-only on disk');
+
+	// idempotent: the selector option is created once, never one group per session
+	const again = await host.rpc('mover.nows.prepare');
+	assert.equal(again.value.workspaceId, workspaceId);
+	assert.equal(host.registry.list().filter((entity) => entity.path.startsWith(tempRoot)).length, 1);
 
 	const status = await host.rpc('mover.status');
 	assert.equal(status.value.capabilities.noWorkspace, true);
 	assert.equal(status.value.capabilities.noWorkspaceRoot, defaultWorkspaceRoot);
+	assert.equal(status.value.capabilities.noWorkspaceWorkspaceId, workspaceId);
 
 	const doctor = await host.rpc('mover.doctor');
 	const check = doctor.value.checks.find((item) => item.id === 'no-workspace');
@@ -439,8 +446,8 @@ test('no-workspace: systemPrompt notice and write guard steer the model to mover
 
 	const promptSpec = contexts.get('workspace-mover:no-workspace');
 	assert.ok(promptSpec, 'no-workspace prompt registered with the prompt registry');
-	const tempCwd = readdirSync(join(host.docs, 'deepseek-harness', 'default-workspace', '.workspace-mover-tmp'))
-		.map((name) => join(host.docs, 'deepseek-harness', 'default-workspace', '.workspace-mover-tmp', name))[0];
+	const prepared = await host.rpc('mover.nows.prepare');
+	const tempCwd = prepared.value.cwd;
 	const text = promptSpec.text({ agent: { session: { id: 's-nows', header: { cwd: tempCwd } } } });
 	assert.match(text, /NO-WORKSPACE mode/);
 	assert.match(text, /mover_begin_workspace/);

@@ -62,17 +62,10 @@ function matches(el, selector) {
   if (attr) {
     const tag = attr[1];
     if (tag && el.tagName?.toLowerCase() !== tag.toLowerCase()) return false;
-    for (const a of attr[2].matchAll(/\[([\w-]+)(?:([*^$]?)=)?(?:["']?([^"'\]]*)["']?)?\]/g)) {
-      // class 在 stub 里是属性对象上的值而不是 attribute，选择器统一按"有效值"读取。
-      const raw = a[1] === 'class' ? el.className : el.getAttribute(a[1]);
-      if (raw === null || raw === undefined) return false;
-      if (a[2] === undefined) continue; // [attr] 只要求存在
-      const value = String(raw);
-      const expected = a[3] ?? '';
-      if (a[2] === '*') { if (!value.includes(expected)) return false; }
-      else if (a[2] === '^') { if (!value.startsWith(expected)) return false; }
-      else if (a[2] === '$') { if (!value.endsWith(expected)) return false; }
-      else if (value !== expected) return false;
+    for (const a of attr[2].matchAll(/\[([\w-]+)(?:=["']?([^"'\]]*)["']?)?\]/g)) {
+      const v = el.getAttribute(a[1]);
+      if (v === null) return false;
+      if (a[2] !== undefined && v !== a[2]) return false;
     }
     return true;
   }
@@ -167,22 +160,6 @@ function createElement(tag) {
     remove() {
       this._removed = true;
       if (this.parentNode) this.parentNode.childNodes = this.parentNode.childNodes.filter((c) => c !== this);
-    },
-    get nextElementSibling() {
-      const p = this.parentNode;
-      if (!p) return null;
-      const list = p.childNodes.filter((c) => c.nodeType === 1);
-      return list[list.indexOf(this) + 1] ?? null;
-    },
-    insertAdjacentElement(position, node) {
-      const p = this.parentNode;
-      if (!p) return null;
-      const index = p.childNodes.indexOf(this);
-      if (position === 'afterend') p.childNodes.splice(index + 1, 0, node);
-      else if (position === 'beforebegin') p.childNodes.splice(index, 0, node);
-      else return null;
-      node.parentNode = p;
-      return node;
     },
     before(ref) {
       const p = ref.parentNode;
@@ -363,7 +340,7 @@ after(() => {
 });
 
 /** 构造一个可用的 ctx（connection.rpc.call 记录到 rpcCalls）。 */
-function makeCtx({ services = {} } = {}) {
+function makeCtx() {
   return {
     connection: {
       rpc: {
@@ -373,7 +350,7 @@ function makeCtx({ services = {} } = {}) {
         },
       },
     },
-    get: (name) => services[name],
+    get: () => undefined,
     slots: undefined,
     effect(fn) {
       const dispose = typeof fn === 'function' ? fn() : undefined;
@@ -817,61 +794,3 @@ test('空 value / 空 results 不抛错', async () => {
   await dragDrop(row, beta, 'session-aaa');
   assert.equal(moveCalls().length, 1);
 });
-
-//#region 无工作区入口（v2.5）
-test('no-workspace entry: injected next to the official new-session button, creates a session at the host-prepared cwd', async () => {
-  resetDom();
-  setResponder((endpoint) => {
-    if (endpoint === 'mover.status') return { ok: true, value: { capabilities: { noWorkspace: true } } };
-    if (endpoint === 'mover.nows.prepare') return { ok: true, value: { cwd: '/tmp/wsm-temp-1', workspaceId: 'wid-nows', workspaceTitle: '无工作区' } };
-    return { ok: true, value: {} };
-  });
-  const newSession = createElement('button');
-  newSession.className = 'hHd-Xa_newSession';
-  newSession.textContent = '新会话';
-  doc._body.appendChild(newSession);
-
-  const created = [];
-  const opened = [];
-  const services = {
-    sessions: { async create(options) { created.push(options); return 'session-nows-1'; } },
-    uiWorkspace: { openSession(sessionId) { opened.push(sessionId); } },
-  };
-  mod.apply(makeCtx({ services }));
-  await new Promise((resolveTick) => setTimeout(resolveTick, 10)); // status probe → refreshSupport → ensure
-  const entry = doc._body.querySelector('.wsm-nows-entry');
-  assert.ok(entry, 'no-workspace entry is injected');
-  assert.equal(entry.parentNode, doc._body, 'entry lives in the sidebar container');
-  assert.equal(doc._body.childNodes[doc._body.childNodes.indexOf(newSession) + 1], entry, 'entry is placed right after the new-session button');
-  assert.equal(entry.getAttribute('aria-label'), '在临时目录开始会话（首次写文件前会自动迁移到持续工作区）');
-  assert.equal(entry.querySelector('.wsm-nows-label')?.textContent, '无工作区');
-  assert.equal(entry.dataset.rail, '0');
-
-  dispatch({ type: 'click', target: entry });
-  await new Promise((resolveTick) => setTimeout(resolveTick, 10));
-  const prepareCall = rpcCalls.find((call) => call.endpoint === 'mover.nows.prepare');
-  assert.ok(prepareCall, 'prepare RPC issued');
-  assert.equal(prepareCall.payload.title, '无工作区', 'the temporary workspace is titled in the UI language');
-  assert.deepEqual(created, [{ workspaceId: 'wid-nows' }], 'session created inside the temporary no-workspace workspace');
-  assert.deepEqual(opened, ['session-nows-1'], 'the new session is opened');
-  assert.match(doc._body.querySelector('.wsm-toast')?.textContent ?? '', /wsm-temp-1/);
-
-  // Rail (collapsed) mode: same entry, icon-only layout.
-  newSession.textContent = '';
-  for (const observer of observers.slice()) observer.trigger([]); // the official sidebar re-rendered
-  await new Promise((resolveTick) => setTimeout(resolveTick, 80)); // debounced re-sync
-  assert.equal(doc._body.querySelector('.wsm-nows-entry')?.dataset.rail, '1');
-});
-
-test('no-workspace entry stays hidden on hosts without the capability', async () => {
-  resetDom();
-  setResponder((endpoint) => (endpoint === 'mover.status' ? { ok: true, value: { capabilities: { noWorkspace: false } } } : { ok: true, value: {} }));
-  const newSession = createElement('button');
-  newSession.className = 'hHd-Xa_newSession';
-  newSession.textContent = '新会话';
-  doc._body.appendChild(newSession);
-  mod.apply(makeCtx());
-  await new Promise((resolveTick) => setTimeout(resolveTick, 10));
-  assert.equal(doc._body.querySelector('.wsm-nows-entry'), null);
-});
-//#endregion

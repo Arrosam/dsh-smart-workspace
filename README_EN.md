@@ -66,7 +66,7 @@ DeepSeek Harness's sidebar supports drag-to-reorder **within** a workspace, but 
 - **🔎 Migration preview**: before confirmation, show source, target path, collisions, running state, adapter mode, and estimated new backup bytes; reuse is called out when a matching snapshot already exists
 - **📂 Empty-group cleanup / open folder**: only truly empty workspaces are listed; open a group directory in your file manager
 - **🤖 Agent tools**: seven model-callable tools — `mover_list_sessions` / `mover_move_session` / `mover_begin_workspace` / `mover_repair_sessions` / `mover_doctor` / `mover_create_workspace` / `mover_rename_workspace` — so "move this session to group X" in the conversation runs the same backup-first pipeline as the panel, and workspaces can be created and renamed too; move, repair and rename ask for user approval first (rename skips it under full access), and hosts without `dsh-tools` skip them automatically
-- **🪶 No-workspace mode**: a "No workspace" entry next to the official New Session button starts a session in a read-only temp folder under the DSH default workspace (no group, nothing cloned). When the task needs to write, `mover_begin_workspace` joins the workspace already handling the same repository (reverse lookup through the relations `mover_list_sessions` exposes, so the repo is never cloned twice) or creates a persistent workspace from the absolute directory the model passes. The move runs right after the turn ends, temp-folder contents travel with it (collision-safe), the temp folder is removed, and the session is resumed automatically in the new working directory
+- **🪶 No-workspace mode**: the workspace **selector gains a real "No workspace" option** (one shared workspace, so new sessions never pile up extra groups); picking it starts a session whose cwd is a shared read-only scratch folder under the DSH default workspace. When the task needs to write, `mover_begin_workspace` joins the workspace already handling the same repository (reverse lookup through the relations `mover_list_sessions` exposes, so the repo is never cloned twice) or creates a persistent workspace from the absolute directory the model passes. The move runs right after the turn ends, scratch contents travel with it (collision-safe), the scratch folder and its option stay, and the session is resumed automatically in the new working directory
 
 ## 🚀 Install
 
@@ -187,19 +187,19 @@ Mid-turn sessions are rejected; failed moves roll back automatically.
 
 ### No-workspace mode (temporary sessions)
 
-For "let's talk first, persist only if we actually need to" — no workspace is occupied and no repository is cloned up front.
+For "let's talk first, persist only if we actually need to" — no real project folder is occupied and no repository is cloned up front.
 
-1. Click **"No workspace"** next to the sidebar's New Session button. The host creates a temp folder under the DSH default workspace (`<Documents>/deepseek-harness/default-workspace/.workspace-mover-tmp/`) and uses it as the new session's cwd.
-   - Why a sidebar group called "No workspace" appears: DSH only enables the official composer for a blank session that belongs to a workspace (ungrouped sessions get an inert input). The plugin therefore registers a **temporary internal workspace** over the temp folder and puts the session inside it; that registration is deleted automatically once the session migrates, so no empty group is left behind.
-2. That folder is **read-only on disk** (`chmod 0500`), and write tools (`write` / `edit` / `bash` / terminal) are additionally denied with migration guidance, so work can never silently land in a throwaway directory.
+1. **Start by picking "No workspace"** in the workspace selector (hero workspace dropdown or the session-header workspace switcher). It is a real workspace, and there is exactly one such group in the sidebar — creating sessions never adds another one. The host prepares a **shared** scratch folder at `<Documents>/deepseek-harness/default-workspace/.workspace-mover-tmp/scratch`; all no-workspace sessions use it.
+   - Why it has to be a real workspace: DSH only enables the official composer for a blank session that belongs to a workspace (ungrouped sessions get an inert input). Using a real workspace keeps typing, titles, and later migration on the official path.
+2. The scratch folder is **read-only on disk** (`chmod 0500`, enforced by the OS on POSIX), and write tools (`write` / `edit` / `bash` / terminal) are additionally denied with migration guidance, so work can never silently land in a throwaway directory.
 3. When files must be written the model calls `mover_begin_workspace` (same approval gate as the move tool — full-access sessions skip it; dragging the session onto any workspace also works):
    - `repository` — the plugin reverse-looks up the workspace already handling that repo (URL, `owner/name`, or folder name) and joins it, avoiding a duplicate clone;
    - `directory` — the plugin creates the missing folder (with parents), registers it as a workspace, and moves the session there;
    - with neither, the error lists the known workspaces and repositories so the model/user can decide.
-4. A running session cannot be moved safely, so the move is queued with `willResume: true`; the plugin drains the queue the moment the turn ends and then sends an automatic "move completed, continue" message, so the model keeps working in the new cwd without a manual nudge. Temp-folder contents move along; existing target files are **never overwritten** (colliding names get a `.from-noworkspace-<timestamp>` suffix and are reported in `workspaceFiles`).
-5. The temp folder is deleted after the move; from then on the session behaves like any other workspace session (moves, backup, history).
+4. A running session cannot be moved safely, so the move is queued with `willResume: true`; the plugin drains the queue the moment the turn ends and then sends an automatic "move completed, continue" message, so the model keeps working in the new cwd without a manual nudge. Scratch contents move along; existing target files are **never overwritten** (colliding names get a `.from-noworkspace-<timestamp>` suffix and are reported in `workspaceFiles`).
+5. The shared scratch folder **stays** (other no-workspace sessions may still be using it); from then on the session behaves like any other workspace session. Set `DSH_WORKSPACE_MOVER_NO_WORKSPACE_TITLE` and restart the host to localize the option's display name.
 
-> Undo does not restore a no-workspace session's files to the temp folder (it is gone); such moves keep their history record but offer no one-click move-back.
+> Undo does not return a no-workspace session to the scratch folder (it is not an undo target); such moves keep their history record but offer no one-click move-back.
 
 ### Bulk move
 
@@ -288,7 +288,7 @@ Every migration runs through the same safety-bounded pipeline: **byte-level back
 - Never silently discards session data — unrecoverable extremes are flagged in red with the scene preserved;
 - Never runs a destructive action without confirmation (conversational move / repair additionally requires the host approval prompt);
 - Never uploads any local data — the plugin makes no network requests, everything runs locally;
-- Never writes into a no-workspace temp folder — it is read-only at the OS level, and the relocation step never overwrites an existing file in the target workspace.
+- Never writes into the no-workspace scratch folder — it is read-only at the OS level on POSIX (Windows maps only the read-only attribute, so the tool guard backs it up), and the relocation step never overwrites an existing file in the target workspace; entries that cannot be moved stay put with their read-only mode restored and are never auto-swept.
 
 **Concrete guarantees:**
 
@@ -308,9 +308,12 @@ Every migration runs through the same safety-bounded pipeline: **byte-level back
 - Sessions still resident in Harness memory (opened recently) cannot be deleted until you restart Harness;
 - If a third-party plugin fully redraws the sidebar, features may stop triggering (**no data damage**);
 - Flat list view has no workspace title rows — the plugin stays inactive there;
-- **The no-workspace entry depends on the official sidebar DOM** (injected next to the New Session button, preferring the stable CSS-modules suffix `_newSession` and falling back to the localized `aria-label`). A major sidebar rewrite can hide the entry without affecting anything else; `mover_begin_workspace` and drag-and-drop still work;
-- **No-workspace mode needs a resolvable DSH default workspace** (`<Documents>/deepseek-harness/default-workspace`, a registered workspace with that title, or the host's `documentsDirectory`); environments without a Documents folder fail that mode with a clear error;
-- **No-workspace moves cannot be undone** (the temp folder is gone and files are already in the target workspace); the move stays visible in `migrations[]` / `recentMoves[]`;
+- **"No workspace" is a permanent workspace group**: it has to exist as a real workspace to appear in the official selector (and to keep a blank session's composer usable). There is only ever one, but it stays in the sidebar; deleting the group is possible, and it is recreated on the next host start because it is the mode's entry point;
+- **No-workspace mode needs a resolvable DSH default workspace** (`<Documents>/deepseek-harness/default-workspace`, or the host's `documentsDirectory`); environments without a Documents folder fail that mode with a clear error;
+- **The shared scratch folder does not isolate files**: every no-workspace session uses the same read-only scratch folder, so it is not one folder per session. The read-only policy prevents sessions from writing into it; files you drop there manually move into the target workspace on the next no-workspace migration (collisions get a suffix);
+- **Read-only is not a hard guarantee on Windows**: `chmod` maps only to the read-only attribute on NTFS, so that platform relies on the `write`/`edit`/`bash`/terminal guard; unlisted write-capable tools from third-party plugins can bypass it (POSIX is covered by the OS);
+- **No-workspace moves cannot be undone** (files are already in the target workspace and the scratch workspace is not an undo target); the move stays visible in `migrations[]` / `recentMoves[]`;
+- **Legacy per-session no-workspace workspaces are consolidated automatically**: early builds registered one temporary workspace per session; on host start the plugin moves idle sessions into the shared scratch folder and deletes those registrations (running sessions wait for the next start).
 - **After a hot reload (HMR) restart the host or hard-refresh the page**: this plugin mounts both RPC routes and agent tools, and repeatedly hot-swapping the same plugin can leave a transient state where tool calls time out or the entry does not appear; a `dsh web` restart or page refresh restores it (verified live after a reload).
 - Major host upgrades that change internal structures may degrade some actions or require a restart; the move-home wizard aborts before touching files if it cannot write safely.
 
