@@ -1212,6 +1212,21 @@ test('no-workspace: prepare creates ONE shared read-only scratch workspace (idem
   assert.equal(host.registry.list().filter((item) => String(item.path).startsWith(tempRoot)).length, 1, 'exactly one no-workspace workspace');
 });
 
+test('no-workspace: a legacy group holding the base title is absorbed and the shared option gets a clean title', async () => {
+  const host = mountHost();
+  // simulate an earlier build: one per-session temporary workspace already titled "No workspace"
+  const tempRoot = join(host.paths.docs, 'deepseek-harness', 'default-workspace', '.workspace-mover-tmp');
+  mkdirSync(tempRoot, { recursive: true });
+  const legacyDir = join(tempRoot, 'tmp-legacy');
+  mkdirSync(legacyDir, { recursive: true });
+  const legacy = await host.registry.create(legacyDir, 'No workspace');
+  const prepared = expectRpcOk(await host.rpc(NOWS.PREPARE));
+  assert.equal(prepared.workspaceTitle, 'No workspace', 'the shared option ends up with the clean base title');
+  assert.equal(host.registry.get(prepared.workspaceId).title, 'No workspace');
+  assert.equal(host.registry.get(legacy.id), undefined, 'the empty legacy group is absorbed and removed');
+  assert.equal(existsSync(legacyDir), false, 'the empty legacy folder is removed');
+});
+
 test('no-workspace: begin joins an existing workspace by repository identity, moves scratch content, keeps the scratch', async () => {
   const sessionController = makeSessionController();
   const host = mountHost({ agents: makeAgents([]) });
