@@ -1312,7 +1312,9 @@ test('no-workspace: begin queues while the session runs, drains after idle, and 
   assert.equal(resume.sessionId, CALLER_SESSION.id);
   assert.equal(resume.mode, 'queue');
   assert.match(resume.content[0].text, /completed/);
-  assert.match(resume.content[0].text, new RegExp(created.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  // 文案里的路径经过 JSON.stringify（Windows 反斜杠会被转义两次），直接按字符串包含断言，
+  // 不要再把路径当正则用。
+  assert.ok(resume.content[0].text.includes(JSON.stringify(created.path)), `resume message names ${created.path}`);
 });
 
 function findArtifact(host, sessionId) {
