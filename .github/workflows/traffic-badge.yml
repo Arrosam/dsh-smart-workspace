@@ -13,6 +13,9 @@ permissions:
 
 jobs:
   update:
+    # The scripts target the upstream repo's traffic API and badge Gist, which
+    # only the upstream TRAFFIC_TOKEN can reach; skip (not fail) in copies/forks.
+    if: github.repository == 'PianoPrince/dsh-workspace-mover'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
